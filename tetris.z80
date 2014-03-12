@@ -1,0 +1,1036 @@
+;Calling convention
+;ix points to the base of a frame
+;sp points to the top of the current frame
+;
+;
+;
+;
+;
+;return space
+;--------
+;args
+;--------
+;caller
+;--------
+
+;overview of main loop:
+;collect user input
+;poll timer
+;update internal state according to user input and timer
+;display internal state
+
+.nolist
+	#include 	"ti83plus.inc"
+.list
+
+.org $9d95 - 2
+.db t2ByteTok, tAsmCmp
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;defines
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;Bit numbers for the button flags.
+down_button_flag .equ 0
+left_button_flag .equ 1
+right_button_flag .equ 2
+up_button_flag .equ 3
+second_button_flag .equ 4
+mode_button_flag .equ 5
+
+Y_MAX .equ 63
+X_MAX .equ 95
+
+_init:
+	;clear LCD first
+	;call clear_graph_buffer
+	
+	;seed RNG using counter on port $35  (should be in use by calc OS) and r
+	in a, ($35)
+	ld b, a
+	ld a, r
+	ld c, a
+	ld d, 0
+	ld e, 0
+	call seed_rng
+	ld b, 60
+_rng_loop:
+	push bc
+		call rng
+	pop bc
+	djnz _rng_loop
+	
+	;initialize timers.... is this necessary?
+	
+	;init game vars
+	;select active piece randomly
+_piece_gen_0:
+	call rng
+	call rng
+	
+	;e contains a random number.  get just the top three bits
+	srl e
+	srl e
+	srl e
+	srl e
+	srl e
+	ld a, e
+	cp $07
+	jr z, _piece_gen_0
+	ld d, 0
+	
+	;multiply de * 20 -> hl
+	ld h, d
+	ld l, e
+	add hl, hl
+	add hl, hl
+	add hl, de
+	add hl, hl
+	add hl, hl
+	ld de, _pieces
+	add hl, de
+	ld (_active_piece), hl
+	ld a, 0
+	ld (_active_piece_ix), a
+	
+	;start coordinates
+	ld a, $00
+	ld (_active_pos_y), a
+	ld a, 5
+	ld (_active_pos_x), a
+	
+_input_logic:
+	;read in arrow keys
+	ld a, $fe
+	out (1), a
+	nop
+	nop
+	in a, (1)
+	ld c, $f0
+	or c
+	
+	;store arrow keys in register b
+	ld b, a
+	
+	;read other keys (2nd for clockwise rotate and mode for counterclockwise)
+	ld a, $bf
+	out (1), a
+	nop
+	nop
+	in a, (1)
+	
+	;store 2nd and mode keys in proper bits in b
+	scf			;need to set carry flag so that msb of a is filled with a 1 when we rotate right.
+	rr a
+	ld c, %11001111
+	or c
+	and b
+	ld c, a			;store non-inverted keys for later in register c
+	
+	;TODO: calculate timing.  For now, we just set the flags to process key
+	;presses on the rising/falling edges.  Detect previous by doing
+	;~prev & current (because keys are read as active low, this will look like
+	;prev & ~current
+	xor $ff			;invert current keys
+	ld b, a			;load into register b
+	
+	;read in previous keys to check for falling edges.  All keys that went from
+	;high to low will have a 1 at their flag.
+	ld a, (keys_prev)
+	and b
+	ld (proc_keys), a
+	
+	ld a, (_dbcount)
+	cp 30
+	jr c, _update_keys
+	ld a, 0
+	ld (_dbcount), a
+	ld a, (proc_keys)
+	or $01
+	ld (proc_keys), a
+	
+_update_keys:
+	;update previous keys
+	ld a, c
+	ld (keys_prev), a
+	
+_update_state:
+	;update internal state: move blocks according to user input
+	
+_check_second_key:
+	;save active piece state
+	ld hl, _active_pos_x
+	ld de, _backup_piece
+	ld bc, $0005
+	ldir
+	
+	;move piece and check for collision
+	ld a, (proc_keys)
+	ld b, a
+	bit second_button_flag, b
+	jr z, _check_left_key
+	
+	ld hl, (_active_piece)
+	ld de, 4
+	add hl, de
+	ld a, (hl)
+	cp $ff
+	jr nz, _second_store_rotation
+	ld de, -16
+	add hl, de
+_second_store_rotation:
+	ld (_active_piece), hl
+	
+	push ix
+		ld hl, (_active_pos_x)		;arg2
+		push hl
+			ld hl, _active_piece	;arg1
+			push hl
+				ld hl, _wall		;arg0
+				push hl
+					push hl			;return space
+						call detect_collision
+					pop hl			;return value
+				pop af				;get rid of stack space for agrs
+			pop af
+		pop af
+	pop ix	
+	
+	;if there wasn't a collision, don't restore the previous state
+	ld a, l
+	cp 0
+	jr z, _check_left_key
+	
+	;restore previous state
+	ld de, _active_pos_x
+	ld hl, _backup_piece
+	ld bc, $0005
+	ldir
+	
+	;for each direction, perform the action if it doesn't cause a collision
+_check_left_key:
+	;save active piece state
+	ld hl, _active_pos_x
+	ld de, _backup_piece
+	ld bc, $0005
+	ldir
+	
+	;move piece and check for collision
+	ld a, (proc_keys)
+	ld b, a
+	bit left_button_flag, b
+	jr z, _check_right_key
+	ld a, (_active_pos_x)
+	dec a
+	ld (_active_pos_x), a
+	
+	push ix
+		ld hl, (_active_pos_x)		;arg2
+		push hl
+			ld hl, _active_piece	;arg1
+			push hl
+				ld hl, _wall		;arg0
+				push hl
+					push hl			;return space
+						call detect_collision
+					pop hl			;return value
+				pop af				;get rid of stack space for agrs
+			pop af
+		pop af
+	pop ix	
+	
+	;if there wasn't a collision, don't restore the previous state
+	ld a, l
+	cp 0
+	jr z, _check_right_key
+	
+	;restore previous state
+	ld de, _active_pos_x
+	ld hl, _backup_piece
+	ld bc, $0005
+	ldir
+	
+	;check for right
+_check_right_key:
+	;save active piece state
+	ld hl, _active_pos_x
+	ld de, _backup_piece
+	ld bc, $0005
+	ldir
+	
+	;move piece and check for collision
+	ld a, (proc_keys)
+	ld b, a
+	bit right_button_flag, b
+	jr z, _check_down_key
+	ld a, (_active_pos_x)
+	inc a
+	ld (_active_pos_x), a
+	
+	push ix
+		ld hl, (_active_pos_x)		;arg2
+		push hl
+			ld hl, _active_piece	;arg1
+			push hl
+				ld hl, _wall		;arg0
+				push hl
+					push hl			;return space
+						call detect_collision
+					pop hl			;return value
+				pop af				;get rid of stack space for agrs
+			pop af
+		pop af
+	pop ix	
+	
+	;if there wasn't a collision, don't restore the previous state
+	ld a, l
+	cp 0
+	jr z, _check_down_key
+	
+	;restore previous state
+	ld de, _active_pos_x
+	ld hl, _backup_piece
+	ld bc, $0005
+	ldir
+
+_check_down_key:
+	;save active piece state
+	ld hl, _active_pos_x
+	ld de, _backup_piece
+	ld bc, $0005
+	ldir
+	
+	;move piece and check for collision
+	ld a, (proc_keys)
+	ld b, a
+	bit down_button_flag, b
+	jp z, _collide_test
+	ld a, (_active_pos_y)
+	inc a
+	ld (_active_pos_y), a
+	
+	push ix
+		ld hl, (_active_pos_x)		;arg2
+		push hl
+			ld hl, _active_piece	;arg1
+			push hl
+				ld hl, _wall		;arg0
+				push hl
+					push hl			;return space
+						call detect_collision
+					pop hl			;return value
+				pop af				;get rid of stack space for agrs
+			pop af
+		pop af
+	pop ix	
+	
+	;if there wasn't a collision, don't restore the previous state
+	ld a, l
+	cp 0
+	jr z, _collide_test
+	
+	;restore previous state TODO: stick piece to wall and generate new piece.
+	ld de, _active_pos_x
+	ld hl, _backup_piece
+	ld bc, $0005
+	ldir
+	
+	;copy piece over to wall
+	;point hl to destination address on wall
+	ld a, (_active_pos_y)
+	ld l, a
+	ld h, 0
+	add hl, hl
+	ld de, _wall
+	add hl, de
+	
+	;shift and transfer over each byte at _active_piece
+	ld b, 4
+_transfer_to_wall:
+	push hl
+		ld hl, (_active_piece)
+		ld e, (hl)
+		ld d, 0
+		inc hl
+		ld (_active_piece), hl
+	pop hl
+	ld a, (_active_pos_x)
+	;and $07
+	cp 0
+	jr z, _wt_shift_done
+	
+_wall_transfer_shift:
+	srl e
+	rr d
+	dec a
+	jr nz, _wall_transfer_shift
+
+_wt_shift_done:
+	ld a, (hl)
+	or e
+	ld (hl), a
+	inc hl
+	ld a, (hl)
+	or d
+	ld (hl), a
+	inc hl
+	djnz _transfer_to_wall
+
+_generate_new_piece:
+	;init game vars
+	;select active piece randomly
+_piece_gen:
+	call rng
+	call rng
+	
+	;e contains a random number.  get just the top three bits
+	srl e
+	srl e
+	srl e
+	srl e
+	srl e
+	ld a, e
+	cp $07
+	jr z, _piece_gen
+	ld d, 0
+	
+	;multiply de * 20 -> hl
+	ld h, d
+	ld l, e
+	add hl, hl
+	add hl, hl
+	add hl, de
+	add hl, hl
+	add hl, hl
+	ld de, _pieces
+	add hl, de
+	ld (_active_piece), hl
+	ld a, 0
+	ld (_active_piece_ix), a
+	
+	;start coordinates
+	ld a, $00
+	ld (_active_pos_y), a
+	ld a, 5
+	ld (_active_pos_x), a	
+
+_collide_test:
+	;test for collisions in new state
+	;push af				;save registers
+		;push bc
+			push ix
+				ld hl, (_active_pos_x)		;arg2
+				push hl
+					ld hl, _active_piece	;arg1
+					push hl
+						ld hl, _wall		;arg0
+						push hl
+							push hl			;return space
+								call detect_collision
+							pop hl			;return value
+						pop af				;get rid of stack space for agrs
+					pop af
+				pop af
+			pop ix							;restore clobbers
+		;pop bc
+	;pop af
+	
+	;return value in hl
+	
+_draw:
+	;put return value from detect_collision into someplace
+	ld de, PlotSScreen + 9
+	ld a, l
+	ld (de), a
+	inc de
+	ld a, h
+	ld (de), a
+	
+	ld a, (_dbcount)
+	inc de
+	ld (de), a
+	inc a
+	ld (_dbcount), a
+	
+	;move wall data onto plotSScreen
+	ld de, _wall
+	ld hl, PlotSScreen
+	ld b, 63
+_wall_move_loop:
+	ld a, (de)
+	ld (hl), a
+	inc de
+	inc hl
+	ld a, (de)
+	ld (hl), a
+	inc de
+	dec hl
+	push bc
+		ld bc, 12
+		add hl, bc
+	pop bc
+	djnz _wall_move_loop
+	
+	;draw sprite
+	ld hl, (_active_piece)
+	ld b, 1
+	ld c, 4
+	ld a, (_active_pos_x)
+	ld d, a
+	ld a, (_active_pos_y)
+	ld e, a
+	call put_sprite
+
+_foo:	
+	call fast_puts
+	jp _input_logic
+
+
+;variable to store key presses
+proc_keys:
+	.db 0
+
+keys_prev:
+	.db 0
+	
+_active_pos_x:
+	.db 0
+
+_active_pos_y:
+	.db 0
+
+_active_piece:
+	.dw 0
+
+_active_piece_ix:
+	.db 0
+
+_backup_piece:
+	.db 0, 0, 0, 0, 0
+
+_dbcount:
+	.db 0
+	
+	.db $c0, $0f
+	.db $c0, $0f
+;the playing space consists of 
+_wall:
+	.db $c0, $0f		;1
+	.db	$c0, $0f
+	.db	$c0, $0f
+	.db	$c0, $0f
+	.db	$c0, $0f		;5
+	.db	$c0, $0f
+	.db	$c0, $0f
+	.db	$c0, $0f
+	.db	$c0, $0f
+	.db	%11000000, %00001111		;10
+	.db	%11000000, %00001111
+	.db	%11000000, %00001111
+	.db	%11000000, %00001111
+	.db	%11000000, %00001111
+	.db	%11000000, %00001111		;15
+	.db	%11000000, %00001111
+	.db	%11000000, %00001111
+	.db	%11000000, %00001111
+	.db	%11000000, %00001111
+	.db	%11000000, %00001111		;20
+	.db	$ff, $ff		;beneath bottom of screen
+;pieces
+_pieces:
+	;square
+	.db %01100000
+	.db %01100000
+	.db %00000000
+	.db %00000000
+
+	.db %01100000
+	.db %01100000
+	.db %00000000
+	.db %00000000
+	
+	.db %01100000
+	.db %01100000
+	.db %00000000
+	.db %00000000
+	
+	.db %01100000
+	.db %01100000
+	.db %00000000
+	.db %00000000
+	
+	.db $ff, $00, $00, $00
+	
+	;T
+	.db %01000000
+	.db %11100000
+	.db %00000000
+	.db %00000000
+	
+	.db %01000000
+	.db %01100000
+	.db %01000000
+	.db $00
+	
+	.db %00000000
+	.db %11100000
+	.db %01000000
+	.db $00
+	
+	.db %01000000
+	.db %11000000
+	.db %01000000
+	.db %00000000
+	
+	.db $ff, $00, $00, $00
+	
+	;L
+	.db %00100000
+	.db %11100000
+	.db %00000000
+	.db %00000000
+	
+	.db %01000000
+	.db %01000000
+	.db %01100000
+	.db $00
+	
+	.db %00000000
+	.db %11100000
+	.db %10000000
+	.db $00
+	
+	.db %11000000
+	.db %01000000
+	.db %01000000
+	.db %00000000
+	
+	.db $ff, $00, $00, $00
+	
+	;backwards L
+	.db %10000000
+	.db %11100000
+	.db %00000000
+	.db %00000000
+	
+	.db %01100000
+	.db %01000000
+	.db %01000000
+	.db $00
+	
+	.db %00000000
+	.db %11100000
+	.db %00100000
+	.db $00
+	
+	.db %01000000
+	.db %01000000
+	.db %11000000
+	.db %00000000
+	
+	.db $ff, $00, $00, $00
+
+	;Line
+	.db %00000000
+	.db %11110000
+	.db %00000000
+	.db %00000000
+	
+	.db %00100000
+	.db %00100000
+	.db %00100000
+	.db %00100000
+	
+	.db %00000000
+	.db %00000000
+	.db %11110000
+	.db $00
+	
+	.db %01000000
+	.db %01000000
+	.db %01000000
+	.db %01000000
+	
+	.db $ff, $00, $00, $00
+	
+	;S
+	.db %01100000
+	.db %11000000
+	.db %00000000
+	.db %00000000
+	
+	.db %01000000
+	.db %01100000
+	.db %00100000
+	.db %00000000
+	
+	.db %00000000
+	.db %01100000
+	.db %11000000
+	.db $00
+	
+	.db %10000000
+	.db %11000000
+	.db %01000000
+	.db %00000000
+	
+	.db $ff, $00, $00, $00
+	
+	;Z
+	.db %11000000
+	.db %01100000
+	.db %00000000
+	.db %00000000
+	
+	.db %00100000
+	.db %01100000
+	.db %01000000
+	.db %00000000
+	
+	.db %00000000
+	.db %11000000
+	.db %01100000
+	.db $00
+	
+	.db %01000000
+	.db %11000000
+	.db %10000000
+	.db %00000000
+	
+	.db $ff, $00, $00, $00
+
+.module detect_collision
+	;TODO: test for x = 0 and x > 15.
+	;args
+	;	x_pos (lsb) y_pos (msb)  arg 2
+	;	pointer to piece		 arg 1
+	;	pointer to wall			 arg 0
+	;returns
+	;	nonzero if collision
+detect_collision:
+	ld ix, 0
+	add ix, sp
+	push de
+		push hl
+			;load address of piece into (ix + 6)
+			ld e, (ix + 6)
+			ld d, (ix + 7)
+			
+			;load address of piece into de and then into hl
+			ld a, (de)
+			ld (ix + 6), a
+			inc de
+			ld a, (de)
+			ld (ix + 7), a
+			
+			;load hl with wall addresses we are interested in.  This is given by
+			;_wall + (2 * active_pos_y)
+			ld l, (ix + 9)
+			ld h, 0
+			add hl, hl
+			
+			;offset up to arg0 addr
+			ld e, (ix + 4)
+			ld d, (ix + 5)
+			add hl, de
+			
+			;now we have the address of wall bits to test against, so load active piece
+			;into de line by line, shifting and testing each time.
+			ld b, 4
+_collide_bits_loop:
+			;load row of piece into de
+			push hl
+				;load address of address of piece into hl
+				ld l, (ix + 6)
+				ld h, (ix + 7)
+				
+				;load piece into de
+				ld e, (hl)
+				inc hl
+				ld d, 0
+				
+				;update row pointer
+				ld (ix + 6), l
+				ld (ix + 7), h
+			pop hl
+			
+			;now de contains the (unshifted) byte of the piece to check against, and hl
+			;points to the relevant portion of the wall.
+			;need to shift de
+			push bc			;save b so b can be loaded with amount to shift
+				ld a, (ix + 8)
+				cp 0
+				jr z, _shift_done
+				ld b, a
+_tetromino_row_shift_loop:
+				srl e
+				rr d
+				djnz _tetromino_row_shift_loop
+_shift_done:
+			pop bc
+			
+			;now de contains the row that we want to & with the value pointed by hl
+			ld a, (hl)
+			and e
+			jr nz, _return1
+			
+			inc hl
+			ld a, (hl)
+			and d
+			jr nz, _return1
+			
+			inc hl		;move hl down to the next row
+			djnz _collide_bits_loop		;jump back to the top of the collision test loop.
+			
+			;if we've reached this point, there is no collision, so return 0
+			ld (ix + 2), 0
+			ld (ix + 3), 0
+			jr _epilouge
+			
+_return1:
+			ld (ix + 2), 1
+			ld (ix + 3), 0
+			
+_epilouge:
+		pop hl
+	pop de
+	ret
+.endmodule
+
+.module rng
+;Seeds the random number generator with the 32 bit value in bcde
+seed_rng:
+	ld a, e
+	ld (_num), a
+	ld a, d
+	ld (_num + 1), a
+	ld a, c
+	ld (_num + 2), a
+	ld a, b
+	ld (_num + 3), a
+	ret
+
+;generate random number and return it in bcde
+;uses a linear feedback shift register with taps at bits 31, 29, 25, and 24
+;(where bit 31 is msb (bit 7 of b))
+rng:
+	ld a, (_num)
+	ld e, a
+	ld a, (_num + 1)
+	ld d, a
+	ld a, (_num + 2)
+	ld c, a
+	ld a, (_num + 3)
+	ld b, a
+	
+	ld h, b
+	;shift
+	ld a, h		;bit 24 in a's lsb
+	srl h		;bit 25 in h's lsb
+	xor h		;xnor
+	xor $ff
+	srl h
+	srl h
+	srl h
+	srl h
+	xor h		;bit 29 in h's lsb
+	xor $ff
+	srl h
+	srl h		;bit 31 in h's lsb
+	xor h		;a contains bit to add
+	xor $ff
+	
+	;shift a into 32 bits.
+	srl a
+	rr b
+	rr c
+	rr d
+	rr e
+	
+	;load it into the random number
+	ld a, e
+	ld (_num), a
+	ld a, d
+	ld (_num + 1), a
+	ld a, c
+	ld (_num + 2), a
+	ld a, b
+	ld (_num + 3), a
+	ret
+	
+_num:
+	.dw 0, 0
+.endmodule
+
+.module put_sprite
+;Puts the given sprite at the given bit coordinates in PlotSScreen.
+;This routine is pretty primitive right now.
+;args
+;	hl - holds pointer to sprite
+;	b  - holds byte-width of sprite
+;	c  - holds bit-height of sprite
+;	d  - holds x coordinate of sprite
+;	e  - holds y coordinate of sprite
+;
+;algorithm
+;	1. point de to starting byte of PlotSScreen
+;	2. sprite_line = 0			to count lines of the sprite
+;	3. sprite_byte = 0			to count width of the sprite
+;	4. load sprite byte into bc
+;	5. Shift appropriately (x coord mod 8)
+;	6. bitmask (de) or c and (de + 1) or b.
+;	7. if sprite_byte < width/8 and room remains onscreen, goto 4
+;	8. move bc down one line
+;	9. move pointer to sprite down
+;	10. if sprite_line < height and room remains onscreen, goto 4
+;	
+;	TODO: clipping
+;	idea: preprocess length, width, and hl for clipping?
+put_sprite:
+	ld ix, 0
+	add ix, sp
+	
+	;move de to proper position
+	push de
+		push hl
+			ld d, 0
+			ld e, (ix - 2)
+			ld h, 0
+			ld l, e
+			add hl, hl
+			add hl, de
+			add hl, hl
+			add hl, hl
+			
+			ld e, (ix - 1)
+			srl e
+			srl e
+			srl e
+			add hl, de
+			
+			ld de, PlotSScreen
+			add hl, de
+			
+			ex de, hl
+		pop hl
+		
+		;Now de points to the byte of PlotSScreen that we want to start writing
+		;to.  We need to loop over all the bytes in each row, loading and shifting
+		;each one.
+_byte_loop:
+		push bc
+			push bc
+				push de
+_put_byte:
+					ld c, (hl)
+					ld b, 0
+					inc hl			;increment sprite pointer
+					ld a, (ix - 1)
+					and $07
+					jr z, _no_shift
+_shift_loop:
+					srl c
+					rr b
+					dec a
+					jr nz, _shift_loop
+
+_no_shift:
+					;Done shifting.  Write to screen
+					ld a, (de)
+					or c
+					ld (de), a
+					inc de
+					
+					ld a, (de)
+					or b
+					ld (de), a
+					
+					;check to see if there are more bytes in the line or not
+					ld a, (ix - 5)
+					dec a
+					cp 0
+					jr z, _done_with_line
+					ld (ix - 5), a
+					jr _put_byte
+				
+_done_with_line:
+				;update stuff for next line.
+				;increment de
+				pop de
+				push hl
+					ld hl, 12
+					add hl, de
+					ex de, hl
+				pop hl
+				
+				;check to see if we should do it again
+			pop bc
+		pop bc
+		dec c
+		jr nz, _byte_loop
+	pop de
+	ret
+.endmodule
+
+.module fast_puts
+fast_puts:
+	di
+	ld hl, PlotSScreen
+	ld c, $20-1		;c holds column number
+	
+_colloop:
+	inc c
+	ld a, c			;check if done with all columns
+	cp $2c
+	ret z			
+	
+	out ($10), a
+	call $000b		;lcd busy quick
+	
+	ld a, $80		;set column
+	out ($10), a	
+	call $000b		
+	ld b, 63
+	ld de, 12
+	
+_pixelloop:			;TODO: see if we can replace call $000b with useful stuff.
+	ld a, (hl)
+	out ($11), a
+	ld a, $00		;clear PlotSScreen space
+	ld (hl), a
+	add hl, de
+	call $000b
+	djnz _pixelloop
+	
+	;move hl back to start and one col over
+	ld de, -(12 * 63) + 1
+	add hl, de
+	jr _colloop
+	
+.endmodule	
+
+.module clear_graph_buffer
+clear_graph_buffer:
+	di
+	ld (_save_sp), sp
+	ld sp, PlotSScreen+768
+	ld hl, $0000
+	ld b, 96
+_loop:
+	push hl
+	push hl
+	push hl
+	push hl
+	djnz _loop
+
+	ld sp, (_save_sp)
+	ei
+	nop
+	ret
+
+_save_sp:
+	.dw 0
+	
+.endmodule
+
+.end
+.end
