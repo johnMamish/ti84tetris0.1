@@ -307,7 +307,7 @@ _check_down_key:
 	ld a, (proc_keys)
 	ld b, a
 	bit down_button_flag, b
-	jp z, _collide_test
+	jp z, _finish_internal_logic
 	ld a, (_active_pos_y)
 	inc a
 	ld (_active_pos_y), a
@@ -330,7 +330,7 @@ _check_down_key:
 	;if there wasn't a collision, don't restore the previous state
 	ld a, l
 	cp 0
-	jp z, _collide_test
+	jp z, _finish_internal_logic
 	
 	;restore previous state
 	;because this was a collision when moving down, we need to stick the piece
@@ -465,11 +465,11 @@ _piece_gen:
 	ld a, $00
 	ld (_active_pos_y), a
 	ld a, 5
-	ld (_active_pos_x), a	
+	ld (_active_pos_x), a
 
-_collide_test:
-	;test for collisions in new state (just for the heck of it.  this does
-	;not serve any real purpose)
+_block_out_test:
+	;if we have just generated a new piece and it is colliding with existing
+	;pieces, then we have a block out condition and the player loses.
 	;push af				;save registers
 		;push bc
 			push ix
@@ -490,7 +490,13 @@ _collide_test:
 	;pop af
 	
 	;return value in hl
+	ld a, l
+	cp 0
+	ret nz
 	
+_finish_internal_logic:
+	
+
 _draw:
 	;put return value from detect_collision into someplace
 	ld de, PlotSScreen + 9
@@ -509,7 +515,7 @@ _draw:
 	;move wall data onto plotSScreen
 	ld de, _wall
 	ld hl, PlotSScreen
-	ld b, 63
+	ld b, 22
 _wall_move_loop:
 	ld a, (de)
 	ld (hl), a
@@ -567,30 +573,30 @@ _backup_piece:
 _dbcount:
 	.db 0
 
-	.db $c0, $0f
-	.db $c0, $0f
+	.db	$e0, $07
+	.db	$e0, $07
 ;the playing space consists of 
 _wall:
-	.db $c0, $0f		;1
-	.db	$c0, $0f
-	.db	$c0, $0f
-	.db	$c0, $0f
-	.db	$c0, $0f		;5
-	.db	$c0, $0f
-	.db	$c0, $0f
-	.db	$c0, $0f
-	.db	$c0, $0f
-	.db	%11000000, %00001111		;10
-	.db	%11000000, %00001111
-	.db	%11000000, %00001111
-	.db	%11000000, %00001111
-	.db	%11000000, %00001111
-	.db	%11000000, %00001111		;15
-	.db	%11000000, %00001111
-	.db	%11000000, %00001111
-	.db	%11000000, %00001111
-	.db	%11000000, %00001111
-	.db	%11000000, %00001111		;20
+	.db	$e0, $07		;1
+	.db	$e0, $07
+	.db	$e0, $07
+	.db	$e0, $07
+	.db	$e0, $07		;5
+	.db	$e0, $07
+	.db	$e0, $07
+	.db	$e0, $07
+	.db	$e0, $07
+	.db	%11100000, %00000111		;10
+	.db	%11100000, %00000111
+	.db	%11100000, %00000111
+	.db	%11100000, %00000111
+	.db	%11100000, %00000111
+	.db	%11100000, %00000111	  	;15
+	.db	%11100000, %00000111
+	.db	%11100000, %00000111
+	.db	%11100000, %00000111
+	.db	%11100000, %00000111
+	.db	%11100000, %00000111	   	;20
 _wall_bottom:
 	.db	$ff, $ff		;beneath bottom of screen
 	
@@ -846,8 +852,8 @@ _shift_done:
 			jr _epilouge
 			
 _return1:
-			ld (ix + 2), 1
-			ld (ix + 3), 0
+			ld (ix + 2), $ff
+			ld (ix + 3), $ff
 			
 _epilouge:
 		pop hl
