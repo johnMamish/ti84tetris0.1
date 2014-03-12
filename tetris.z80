@@ -118,6 +118,10 @@ _input_logic:
 	nop
 	in a, (1)
 	
+	;DEL button insta-quits
+	bit 7, a
+	ret z
+	
 	;store 2nd and mode keys in proper bits in b
 	scf			;need to set carry flag so that msb of a is filled with a 1 when we rotate right.
 	rr a
@@ -326,9 +330,12 @@ _check_down_key:
 	;if there wasn't a collision, don't restore the previous state
 	ld a, l
 	cp 0
-	jr z, _collide_test
+	jp z, _collide_test
 	
-	;restore previous state TODO: stick piece to wall and generate new piece.
+	;restore previous state
+	;because this was a collision when moving down, we need to stick the piece
+	;to the wall, clear rows that need to be cleared, and generate a new 
+	;piece
 	ld de, _active_pos_x
 	ld hl, _backup_piece
 	ld bc, $0005
@@ -342,42 +349,89 @@ _check_down_key:
 	add hl, hl
 	ld de, _wall
 	add hl, de
+	push hl				;save for (much) later
 	
-	;shift and transfer over each byte at _active_piece
-	ld b, 4
-_transfer_to_wall:
-	push hl
-		ld hl, (_active_piece)
-		ld e, (hl)
-		ld d, 0
+		;shift and transfer over each byte at _active_piece
+		ld b, 4
+	_transfer_to_wall:
+		push hl
+			ld hl, (_active_piece)
+			ld e, (hl)
+			ld d, 0
+			inc hl
+			ld (_active_piece), hl
+		pop hl
+		ld a, (_active_pos_x)
+		;and $07
+		cp 0
+		jr z, _wt_shift_done
+		
+	_wall_transfer_shift:
+		srl e
+		rr d
+		dec a
+		jr nz, _wall_transfer_shift
+
+	_wt_shift_done:
+		ld a, (hl)
+		or e
+		ld (hl), a
 		inc hl
-		ld (_active_piece), hl
-	pop hl
-	ld a, (_active_pos_x)
-	;and $07
-	cp 0
-	jr z, _wt_shift_done
+		ld a, (hl)
+		or d
+		ld (hl), a
+		inc hl
+		djnz _transfer_to_wall
+		
+_clear_full_rows:
+	pop hl			;restore pointer to first row of interest
+	ld b, 4
+_row_clear_loop:	;loop to check for a clear row and shift down if necessary.
+	ld a, (hl)
+	inc hl
+	cp $ff
+	jr z, _row_clear_test_bit_2
+	inc hl			;need to inc hl because later instructions won't
+	jp _row_clear_loop_end
+_row_clear_test_bit_2
+	ld a, (hl)
+	inc hl
+	cp $ff
+	jr nz, _row_clear_loop_end
+_shift_down_over_row:	;shift all bytes above hl down
+	push bc
+		push hl
+			dec hl													
+			ld e, l
+			ld d, h
+			dec hl
+			dec hl
+			push hl
+				push de
+					;calculate amount to decrement
+					ld de, _wall
+					scf
+					ccf
+					sbc hl, de
+					;srl l			why did I have this here?!
+					ld b, 0
+					ld c, l
+				pop de
+			pop hl
+			lddr
+		pop hl
+	pop bc
+_row_clear_loop_end:
+	;check to see if hl has hit the bottom of the wall
+	ld a, h
+	cp _wall_bottom >> 8
+	jr nz, _row_clear_loop_again
+	ld a, l
+	cp _wall_bottom & $ff
+	jr z, _piece_gen
+_row_clear_loop_again:
+	djnz _row_clear_loop
 	
-_wall_transfer_shift:
-	srl e
-	rr d
-	dec a
-	jr nz, _wall_transfer_shift
-
-_wt_shift_done:
-	ld a, (hl)
-	or e
-	ld (hl), a
-	inc hl
-	ld a, (hl)
-	or d
-	ld (hl), a
-	inc hl
-	djnz _transfer_to_wall
-
-_generate_new_piece:
-	;init game vars
-	;select active piece randomly
 _piece_gen:
 	call rng
 	call rng
@@ -414,7 +468,8 @@ _piece_gen:
 	ld (_active_pos_x), a	
 
 _collide_test:
-	;test for collisions in new state
+	;test for collisions in new state (just for the heck of it.  this does
+	;not serve any real purpose)
 	;push af				;save registers
 		;push bc
 			push ix
@@ -491,7 +546,8 @@ proc_keys:
 
 keys_prev:
 	.db 0
-	
+
+;variables to store piece states
 _active_pos_x:
 	.db 0
 
@@ -507,9 +563,10 @@ _active_piece_ix:
 _backup_piece:
 	.db 0, 0, 0, 0, 0
 
+;other static vars
 _dbcount:
 	.db 0
-	
+
 	.db $c0, $0f
 	.db $c0, $0f
 ;the playing space consists of 
@@ -534,8 +591,10 @@ _wall:
 	.db	%11000000, %00001111
 	.db	%11000000, %00001111
 	.db	%11000000, %00001111		;20
+_wall_bottom:
 	.db	$ff, $ff		;beneath bottom of screen
-;pieces
+	
+;bitmasks for pieces
 _pieces:
 	;square
 	.db %01100000
