@@ -144,7 +144,7 @@ _input_logic:
 	ld (proc_keys), a
 	
 	ld a, (_dbcount)
-	cp 30
+	cp 14
 	jr c, _update_keys
 	ld a, 0
 	ld (_dbcount), a
@@ -383,6 +383,31 @@ _check_down_key:
 		inc hl
 		djnz _transfer_to_wall
 		
+_lock_out:
+		;check to see if the locked piece is in the top two rows.  This means
+		;that the player has lost
+		ld hl, _wall
+		ld a, (hl)
+		and $1f
+		jr nz, _lock_out_loser			;loses
+		inc hl
+		ld a, (hl)
+		and $f8
+		jr nz, _lock_out_loser		;loses
+		inc hl
+		ld a, (hl)
+		and $1f
+		jr nz, _lock_out_loser		;loses
+		inc hl
+		ld a, (hl)
+		and $f8
+		jr nz, _lock_out_loser			;loses
+		jr _clear_full_rows
+		
+_lock_out_loser:
+	pop hl
+	ret
+	
 _clear_full_rows:
 	pop hl			;restore pointer to first row of interest
 	ld b, 4
@@ -393,7 +418,7 @@ _row_clear_loop:	;loop to check for a clear row and shift down if necessary.
 	jr z, _row_clear_test_bit_2
 	inc hl			;need to inc hl because later instructions won't
 	jp _row_clear_loop_end
-_row_clear_test_bit_2
+_row_clear_test_bit_2:
 	ld a, (hl)
 	inc hl
 	cp $ff
@@ -511,40 +536,288 @@ _draw:
 	ld (de), a
 	inc a
 	ld (_dbcount), a
-	
-	;move wall data onto plotSScreen
-	ld de, _wall
-	ld hl, PlotSScreen
-	ld b, 22
-_wall_move_loop:
-	ld a, (de)
-	ld (hl), a
-	inc de
-	inc hl
-	ld a, (de)
-	ld (hl), a
-	inc de
-	dec hl
-	push bc
-		ld bc, 12
-		add hl, bc
-	pop bc
-	djnz _wall_move_loop
-	
-	;draw sprite
-	ld hl, (_active_piece)
-	ld b, 1
-	ld c, 4
-	ld a, (_active_pos_x)
-	ld d, a
-	ld a, (_active_pos_y)
-	ld e, a
-	call put_sprite
 
-_foo:	
+	;draw wall data onto plotSScreen
+	ld de, _wall
+	ld ix, PlotSScreen + 4
+	ld b, 21
+	
+	;for each row of the wall
+	;	if bit 0 is on
+	;		load ix in a certain way
+	;	if bit 1 is on
+	;		load ix in a certain way
+	;	if bit 2 is on
+	;.......
+	;   if bit 9 is on
+	;		load ix in a certain way
+	;	increment ix by 48
+_wall_draw_loop:
+	;load wall into ix
+	ld a, (de)
+	ld h, a
+	inc de
+	ld a, (de)
+	ld l, a
+	inc de
+	
+	;chain of ifs
+_wall_draw_if_0:
+	bit 4, h
+	jr z, _wall_draw_if_1
+	ld a, (ix)
+	or %11100000
+	ld (ix), a
+	ld a, (ix + 12)
+	or %10100000
+	ld (ix + 12), a
+	ld a, (ix + 24)
+	or %11100000
+	ld (ix + 24), a
+	
+_wall_draw_if_1:
+	bit 3, h
+	jr z, _wall_draw_if_2
+	ld a, (ix)
+	or %00011100
+	ld (ix), a
+	ld a, (ix + 12)
+	or %00010100
+	ld (ix + 12), a
+	ld a, (ix + 24)
+	or %00011100
+	ld (ix + 24), a
+	
+_wall_draw_if_2:
+	bit 2, h
+	jr z, _wall_draw_if_3
+	ld a, (ix)
+	or %00000011
+	ld (ix), a
+	ld a, (ix + 12)
+	or %00000010
+	ld (ix + 12), a
+	ld a, (ix + 24)
+	or %00000011
+	ld (ix + 24), a
+	
+	ld a, (ix + 1)
+	or %10000000
+	ld (ix + 1), a
+	ld a, (ix + 13)
+	or %10000000
+	ld (ix + 13), a
+	ld a, (ix + 25)
+	or %10000000
+	ld (ix + 25), a
+	
+_wall_draw_if_3:
+	bit 1, h
+	jr z, _wall_draw_if_4
+	ld a, (ix + 1)
+	or %01110000
+	ld (ix + 1), a
+	ld a, (ix + 13)
+	or %01010000
+	ld (ix + 13), a
+	ld a, (ix + 25)
+	or %01110000
+	ld (ix + 25), a
+	
+_wall_draw_if_4:
+	bit 0, h
+	jr z, _wall_draw_if_5
+	ld a, (ix + 1)
+	or %00001110
+	ld (ix + 1), a
+	ld a, (ix + 13)
+	or %00001010
+	ld (ix + 13), a
+	ld a, (ix + 25)
+	or %00001110
+	ld (ix + 25), a
+	
+_wall_draw_if_5:
+	bit 7, l
+	jr z, _wall_draw_if_6
+	ld a, (ix + 1)
+	or %00000001
+	ld (ix + 1), a
+	ld a, (ix + 13)
+	or %00000001
+	ld (ix + 13), a
+	ld a, (ix + 25)
+	or %00000001
+	ld (ix + 25), a
+	
+	ld a, (ix + 2)
+	or %11000000
+	ld (ix + 2), a
+	ld a, (ix + 14)
+	or %01000000
+	ld (ix + 14), a
+	ld a, (ix + 26)
+	or %11000000
+	ld (ix + 26), a
+	
+_wall_draw_if_6:
+	bit 6, l
+	jr z, _wall_draw_if_7
+	ld a, (ix + 2)
+	or %00111000
+	ld (ix + 2), a
+	ld a, (ix + 14)
+	or %00101000
+	ld (ix + 14), a
+	ld a, (ix + 26)
+	or %00111000
+	ld (ix + 26), a
+	
+_wall_draw_if_7:
+	bit 5, l
+	jr z, _wall_draw_if_8
+	ld a, (ix + 2)
+	or %00000111
+	ld (ix + 2), a
+	ld a, (ix + 14)
+	or %00000101
+	ld (ix + 14), a
+	ld a, (ix + 26)
+	or %00000111
+	ld (ix + 26), a
+	
+_wall_draw_if_8:
+	bit 4, l
+	jr z, _wall_draw_if_9
+	ld a, (ix + 3)
+	or %11100000
+	ld (ix + 3), a
+	ld a, (ix + 15)
+	or %10100000
+	ld (ix + 15), a
+	ld a, (ix + 27)
+	or %11100000
+	ld (ix + 27), a
+	
+_wall_draw_if_9:
+	bit 3, l
+	jr z, _wall_draw_if_end
+	ld a, (ix + 3)
+	or %00011100
+	ld (ix + 3), a
+	ld a, (ix + 15)
+	or %00010100
+	ld (ix + 15), a
+	ld a, (ix + 27)
+	or %00011100
+	ld (ix + 27), a
+
+_wall_draw_if_end:
+	push de
+		ld de, 36
+		add ix, de
+	pop de
+	dec b
+	jp nz, _wall_draw_loop
+
+;_wall_move:
+;	;move wall data onto plotSScreen
+;	ld de, _wall
+;	ld hl, PlotSScreen
+;	ld b, 21
+;_wall_move_loop:
+;	ld a, (de)
+;	ld (hl), a
+;	inc de
+;	inc hl
+;	ld a, (de)
+;	ld (hl), a
+;	inc de
+;	dec hl
+;	push bc
+;		ld bc, 12
+;		add hl, bc
+;	pop bc
+;	djnz _wall_move_loop
+;	
+;	;draw sprite
+;	ld hl, (_active_piece)
+;	ld b, 1
+;	ld c, 4
+;	ld a, (_active_pos_x)
+;	ld d, a
+;	ld a, (_active_pos_y)
+;	ld e, a
+;	call put_sprite
+	
+	;draw (large) sprite
+	;for each byte of 
+	ld hl, (_active_piece)		;hl holds pointer to active piece
+	
+	ld a, (_active_pos_x)		;graphical x-pos = x-pos * 3 + 32
+	add a, -3					;subtract 3, the bit-with of the well's left margin
+	ld b, a
+	add a, a
+	add a, b	
+	add a, 32
+	ld d, a						; d holds x pos
+	
+	ld a, (_active_pos_y)		;graphical y-pos = y-pos*3
+	ld b, a
+	add a, a
+	add a, b
+	ld e, a						;e holds y-pos
+	
+	ld b, 4
+	
+_big_sprite_byte_loop:
+	;get next row into a
+	ld a, (hl)
+_big_sprite_bit_loop:
+	bit 7, a
+	jr z, _big_sprite_bit_loop_done
+	;bit 7 of a was nonzero, so we need to put a sprite at the appropriate
+	;location
+	push hl
+		push bc
+			push de
+				push af
+					ld hl, _big_block_sprite
+					ld b, 1
+					ld c, 3
+					call put_sprite
+					pop af
+			pop de
+		pop bc
+	pop hl
+
+_big_sprite_bit_loop_done:
+	;prepare for next loop
+	sla a		;shift over next bit
+	inc d		;x-pos += 3.  inc 3 times is cheapest
+	inc d
+	inc d
+	cp 0		;if a is 0, we can be done with this byte.
+	jr nz, _big_sprite_bit_loop
+	
+	;reset x coordinate and increment y-coordinate
+	ld a, (_active_pos_x)		;graphical x-pos = x-pos * 3 + 32
+	add a, -3
+	ld c, a
+	add a, a
+	add a, c	
+	add a, 32
+	ld d, a						; d holds x pos
+	
+	inc e
+	inc e
+	inc e
+	
+	inc hl
+	djnz _big_sprite_byte_loop
+	
 	call fast_puts
 	jp _input_logic
-
 
 ;variable to store key presses
 proc_keys:
@@ -762,7 +1035,12 @@ _pieces:
 	.db %00000000
 	
 	.db $ff, $00, $00, $00
-
+	
+_big_block_sprite:
+	.db %11100000
+	.db %10100000
+	.db %11100000
+	
 .module detect_collision
 	;TODO: test for x = 0 and x > 15.
 	;args
