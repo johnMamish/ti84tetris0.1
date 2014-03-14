@@ -41,8 +41,30 @@ Y_MAX .equ 63
 X_MAX .equ 95
 
 _init:
-	;clear LCD first
-	;call clear_graph_buffer
+	
+	di
+	;initialize timing interrupts
+	;install IVT
+	ld a, $9a
+	ld i, a
+	ld h, a
+	ld l, 0
+	ld (hl), $99
+	push hl
+	pop de
+	inc de
+	ld bc, $100
+	ldir
+	
+	;put isr at $9999
+	ld hl, _isr
+	ld de, $9999
+	ld bc, _isr_end - _isr
+	ldir
+	
+	;enable interrupts
+	im 2
+	ei
 	
 	;seed RNG using counter on port $35  (should be in use by calc OS) and r
 	in a, ($35)
@@ -58,8 +80,6 @@ _rng_loop:
 		call rng
 	pop bc
 	djnz _rng_loop
-	
-	;initialize timers.... is this necessary?
 	
 	;init game vars
 	;select active piece randomly
@@ -120,7 +140,7 @@ _input_logic:
 	
 	;DEL button insta-quits
 	bit 7, a
-	ret z
+	jp z, _endgame
 	
 	;store 2nd and mode keys in proper bits in b
 	scf			;need to set carry flag so that msb of a is filled with a 1 when we rotate right.
@@ -144,7 +164,7 @@ _input_logic:
 	ld (proc_keys), a
 	
 	ld a, (_dbcount)
-	cp 14
+	cp 50
 	jr c, _update_keys
 	ld a, 0
 	ld (_dbcount), a
@@ -406,7 +426,7 @@ _lock_out:
 		
 _lock_out_loser:
 	pop hl
-	ret
+	jp _endgame
 	
 _clear_full_rows:
 	pop hl			;restore pointer to first row of interest
@@ -517,7 +537,7 @@ _block_out_test:
 	;return value in hl
 	ld a, l
 	cp 0
-	ret nz
+	jp nz, _endgame
 	
 _finish_internal_logic:
 	
@@ -819,6 +839,32 @@ _big_sprite_bit_loop_done:
 	call fast_puts
 	jp _input_logic
 
+;code to wrap everything up (clear LCD, return hardware to original state,
+;etc).  This will probably be located elsewhere in later editions of the game.
+_endgame:
+	di
+	im 1
+	ei
+	ret
+
+;isr for counting shit.  Counts _dbcount
+_isr:
+	ex af, af'
+	exx
+	xor a		;disable hardware
+	out (3), a
+	ld hl, (_dbcount)
+	inc hl
+	ld (_dbcount), hl
+	
+	ld a, $0b	;reenable hardware
+	out (3), a
+	ex af, af'
+	exx
+	ei
+	ret
+_isr_end:
+	
 ;variable to store key presses
 proc_keys:
 	.db 0
@@ -844,7 +890,7 @@ _backup_piece:
 
 ;other static vars
 _dbcount:
-	.db 0
+	.dw 0, 0
 
 	.db	$e0, $07
 	.db	$e0, $07
@@ -1316,7 +1362,6 @@ _done_with_line:
 
 .module fast_puts
 fast_puts:
-	di
 	ld hl, PlotSScreen
 	ld c, $20-1		;c holds column number
 	
