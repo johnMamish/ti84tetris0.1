@@ -37,11 +37,12 @@ up_button_flag .equ 3
 second_button_flag .equ 4
 mode_button_flag .equ 5
 
+hold_time .equ 60
+
 Y_MAX .equ 63
 X_MAX .equ 95
 
 _init:
-	
 	di
 	;initialize timing interrupts
 	;install IVT
@@ -143,8 +144,8 @@ _input_logic:
 	jp z, _endgame
 	
 	;store 2nd and mode keys in proper bits in b
-	scf			;need to set carry flag so that msb of a is filled with a 1 when we rotate right.
-	rr a
+	scf			;need to set carry flag so that msb of a is filled with a 1
+	rr a		;when we rotate right.
 	ld c, %11001111
 	or c
 	and b
@@ -159,23 +160,123 @@ _input_logic:
 	
 	;read in previous keys to check for falling edges.  All keys that went from
 	;high to low will have a 1 at their flag.
-	ld a, (keys_prev)
+	ld a, (_keys_prev)
 	and b
-	ld (proc_keys), a
+	ld (_proc_keys), a
 	
+	;set timers for keys with rising edges.  (N.B. though the key hardware
+	;us falling edges, register a contains rising edges)
+	;for i = 0 to 2
+	;	if(a[i]  (the bit, that is))
+	;		key_timers[i] = current time + time until fast move
+	;load current time in a
+	ld b, a
 	ld a, (_dbcount)
-	cp 50
-	jr c, _update_keys
-	ld a, 0
-	ld (_dbcount), a
-	ld a, (proc_keys)
+	add a, 50
+	
+	;just unroll the loop
+	bit left_button_flag, b
+	jr z, _load_rb_time
+	ld (_left_time), a
+_load_rb_time:
+	bit right_button_flag, b
+	jr z, _load_db_time
+	ld (_right_time), a
+_load_db_time:
+	bit down_button_flag, b
+	jr z, _load_times_end
+	ld a, (_dbcount)				;use less time for initial down.
+	add a, 15
+	ld (_down_time), a
+_load_times_end:
+	
+	;update "stickies."  If we had a falling edge, we will sticky the
+	;corresponding key and unsticky keys that are mutually exclusive.
+	
+	
+	;Update timing.  Check each timer to see if we need to set the update flags for held keys
+	ld a, (_dbcount)
+	ld b, a
+	ld a, c						;c contains non inverted key presses
+	xor $ff
+	bit left_button_flag, a
+	jr z, _dont_update_left
+	ld a, (_left_time)
+	sub b
+	bit 7, a
+	jr z, _dont_update_left
+	
+	;made it this far, so we should update left
+	ld a, (_proc_keys)
+	or 1 << left_button_flag
+	ld (_proc_keys), a
+	ld a, (_dbcount)
+	add a, 17
+	ld (_left_time), a
+
+_dont_update_left:
+	;Update timing.  Check each timer to see if we need to set the update flags for held keys
+	ld a, (_dbcount)
+	ld b, a
+	ld a, c						;c contains non inverted key presses
+	xor $ff
+	bit right_button_flag, a
+	jr z, _dont_update_right
+	ld a, (_right_time)
+	sub b
+	bit 7, a
+	jr z, _dont_update_right
+	
+	;made it this far, so we should update left
+	ld a, (_proc_keys)
+	or 1 << right_button_flag
+	ld (_proc_keys), a
+	ld a, (_dbcount)
+	add a, 17
+	ld (_right_time), a
+	
+_dont_update_right:
+	;Update timing.  Check each timer to see if we need to set the update flags for held keys
+	ld a, (_dbcount)
+	ld b, a
+	ld a, c						;c contains non inverted key presses
+	xor $ff
+	bit down_button_flag, a
+	jr z, _update_gravity
+	ld a, (_down_time)
+	sub b
+	bit 7, a
+	jr z, _update_gravity
+	
+	;made it this far, so we should update left
+	ld a, (_proc_keys)
+	or 1 << down_button_flag
+	ld (_proc_keys), a
+	ld a, (_dbcount)
+	add a, 17
+	ld (_down_time), a
+	
+_update_gravity:
+	;check to apply gravity
+	bit down_button_flag, c		;only do so if the down key is unpressed.
+	jr z, _update_keys			;remember, c contains not of keys.
+	ld a, (_dbcount)			
+	ld b, a
+	ld a, (_grav_time)
+	sub b						;if next time - current time < 0, we can
+	bit 7, a					;move the piece down.
+	jr z, _update_keys
+	ld a, (_proc_keys)			;move piece down
 	or $01
-	ld (proc_keys), a
+	ld (_proc_keys), a
+	ld a, (_dbcount)			;load with next time.
+	add a, 60					;TODO: levelling here.
+	ld (_grav_time), a
 	
 _update_keys:
 	;update previous keys
 	ld a, c
-	ld (keys_prev), a
+	ld (_keys_prev), a
 	
 _update_state:
 	;update internal state: move blocks according to user input
@@ -188,7 +289,7 @@ _check_second_key:
 	ldir
 	
 	;move piece and check for collision
-	ld a, (proc_keys)
+	ld a, (_proc_keys)
 	ld b, a
 	bit second_button_flag, b
 	jr z, _check_left_key
@@ -239,7 +340,7 @@ _check_left_key:
 	ldir
 	
 	;move piece and check for collision
-	ld a, (proc_keys)
+	ld a, (_proc_keys)
 	ld b, a
 	bit left_button_flag, b
 	jr z, _check_right_key
@@ -282,7 +383,7 @@ _check_right_key:
 	ldir
 	
 	;move piece and check for collision
-	ld a, (proc_keys)
+	ld a, (_proc_keys)
 	ld b, a
 	bit right_button_flag, b
 	jr z, _check_down_key
@@ -324,7 +425,7 @@ _check_down_key:
 	ldir
 	
 	;move piece and check for collision
-	ld a, (proc_keys)
+	ld a, (_proc_keys)
 	ld b, a
 	bit down_button_flag, b
 	jp z, _finish_internal_logic
@@ -866,10 +967,26 @@ _isr:
 _isr_end:
 	
 ;variable to store key presses
-proc_keys:
+;flags of which directions to process
+_proc_keys:
 	.db 0
 
-keys_prev:
+;variable to store previous keys to check for rising/falling edges
+_keys_prev:
+	.db 0
+
+;directions to hold timing for key repeats
+_left_time:
+	.db 0
+_right_time:
+	.db 0
+_down_time:
+	.db 0
+_grav_time:
+	.db 0
+	
+;tells if a key should be considered with the counter or not.
+_stickies:
 	.db 0
 
 ;variables to store piece states
