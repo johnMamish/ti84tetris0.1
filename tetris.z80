@@ -248,13 +248,22 @@ _dont_update_right:
 	bit 7, a
 	jr z, _update_gravity
 	
-	;made it this far, so we should update left
+	;made it this far, so we should update down
 	ld a, (_proc_keys)
 	or 1 << down_button_flag
 	ld (_proc_keys), a
 	ld a, (_dbcount)
 	add a, 17
 	ld (_down_time), a
+	
+	;also increment score for soft drop
+	ld hl, _score - 1
+_inc_score_soft_drop_loop:
+	inc hl
+	ld a, (hl)
+	inc a
+	ld (hl), a
+	jr nc, _update_gravity
 	
 _update_gravity:
 	;check to apply gravity
@@ -529,9 +538,17 @@ _lock_out_loser:
 	pop hl
 	jp _endgame
 	
+	;here we want to detect all of the rows that are full and clear them out,
+	;then reward points accordingly.
+	;hl points to the top row where the piece was placed.
+	;b counts the iterations to do (4 total for all 4 rows of the piece)
+	;c holds number of rows cleared for score calcing.
+	;a is a temp variable
+	;de is used for lddr-ing.
 _clear_full_rows:
 	pop hl			;restore pointer to first row of interest
 	ld b, 4
+	ld c, 0			;c counts the number of rows cleared.
 _row_clear_loop:	;loop to check for a clear row and shift down if necessary.
 	ld a, (hl)
 	inc hl
@@ -559,7 +576,6 @@ _shift_down_over_row:	;shift all bytes above hl down
 					scf
 					ccf
 					sbc hl, de
-					;srl l			why did I have this here?!
 					ld b, 0
 					ld c, l
 				pop de
@@ -567,6 +583,9 @@ _shift_down_over_row:	;shift all bytes above hl down
 			lddr
 		pop hl
 	pop bc
+	
+	;increment # rows cleared.
+	inc c
 _row_clear_loop_end:
 	;check to see if hl has hit the bottom of the wall
 	ld a, h
@@ -574,9 +593,35 @@ _row_clear_loop_end:
 	jr nz, _row_clear_loop_again
 	ld a, l
 	cp _wall_bottom & $ff
-	jr z, _piece_gen
+	jr z, _tabulate_row_points
 _row_clear_loop_again:
 	djnz _row_clear_loop
+
+_tabulate_row_points:
+	;use the count of the rows cleared to increment the score accordingly
+	;point hl to the score to add.
+	ld hl, _scoring_table
+	ld a, c
+	add a, a
+	ld c, a
+	ld b, 0
+	add hl, bc
+	
+	;load score to add into de
+	ld a, (hl)
+	ld e, a
+	inc hl
+	ld a, (hl)
+	ld d, a
+	
+	;add de to the existing score
+	ld hl, (_score)
+	add hl, de
+	ld (_score), hl
+	ld hl, (_score + 2)
+	ld de, 0
+	adc hl, de
+	ld (_score + 2), hl
 	
 _piece_gen:
 	call rng
@@ -937,6 +982,16 @@ _big_sprite_bit_loop_done:
 	inc hl
 	djnz _big_sprite_byte_loop
 	
+	;draw score
+	ld a, (_score)
+	ld (PlotSScreen + 12*4 + 11), a
+	ld a, (_score + 1)
+	ld (PlotSScreen + 12*4 + 10), a
+	ld a, (_score + 2)
+	ld (PlotSScreen + 12*4 + 9), a
+	ld a, (_score + 3)
+	ld (PlotSScreen + 12*4 + 8), a
+	
 	call fast_puts
 	jp _input_logic
 
@@ -1005,6 +1060,18 @@ _active_piece_ix:
 _backup_piece:
 	.db 0, 0, 0, 0, 0
 
+;holds the score
+_score:
+	.dw 0, 0
+
+;information on how to increase score as level increases
+_score_levelling_table:
+	.dw 0, 100, 300, 500, 800
+
+;table for holding score information
+_scoring_table:
+	.dw 0, 100, 300, 500, 800
+
 ;other static vars
 _dbcount:
 	.dw 0, 0
@@ -1035,7 +1102,7 @@ _wall:
 	.db	%11100000, %00000111	   	;20
 _wall_bottom:
 	.db	$ff, $ff		;beneath bottom of screen
-	
+
 ;bitmasks for pieces
 _pieces:
 	;square
