@@ -257,13 +257,13 @@ _dont_update_right:
 	ld (_down_time), a
 	
 	;also increment score for soft drop
-	ld hl, _score - 1
-_inc_score_soft_drop_loop:
-	inc hl
-	ld a, (hl)
-	inc a
-	ld (hl), a
-	jr nc, _update_gravity
+	ld ix, _score
+	ld hl, _bcd_one
+	ld de, _score
+	ld b, 8
+	push bc
+		call add_bcd
+	pop bc
 	
 _update_gravity:
 	;check to apply gravity
@@ -600,28 +600,28 @@ _row_clear_loop_again:
 _tabulate_row_points:
 	;use the count of the rows cleared to increment the score accordingly
 	;point hl to the score to add.
-	ld hl, _scoring_table
-	ld a, c
-	add a, a
-	ld c, a
-	ld b, 0
-	add hl, bc
+	;ld hl, _scoring_table
+	;ld a, c
+	;add a, a
+	;ld c, a
+	;ld b, 0
+	;add hl, bc
 	
 	;load score to add into de
-	ld a, (hl)
-	ld e, a
-	inc hl
-	ld a, (hl)
-	ld d, a
+	;ld a, (hl)
+	;ld e, a
+	;inc hl
+	;ld a, (hl)
+	;ld d, a
 	
 	;add de to the existing score
-	ld hl, (_score)
-	add hl, de
-	ld (_score), hl
-	ld hl, (_score + 2)
-	ld de, 0
-	adc hl, de
-	ld (_score + 2), hl
+	;ld hl, (_score)
+	;add hl, de
+	;ld (_score), hl
+	;ld hl, (_score + 2)
+	;ld de, 0
+	;adc hl, de
+	;ld (_score + 2), hl
 	
 _piece_gen:
 	call rng
@@ -983,16 +983,26 @@ _big_sprite_bit_loop_done:
 	djnz _big_sprite_byte_loop
 	
 	;draw score
-	ld a, (_score)
-	ld (PlotSScreen + 12*4 + 11), a
-	ld a, (_score + 1)
-	ld (PlotSScreen + 12*4 + 10), a
-	ld a, (_score + 2)
-	ld (PlotSScreen + 12*4 + 9), a
-	ld a, (_score + 3)
-	ld (PlotSScreen + 12*4 + 8), a
+	;Translate bcd number at _score to a string.  Pretty easy, really.
+	ld b, 8
+	ld de, _score
+	ld hl, _scorestr + 7
+_score_flip_and_ascii_loop:
+	ld a, (de)
+	add a, $30
+	ld (hl), a
+	dec hl
+	inc de
+	djnz _score_flip_and_ascii_loop
+	
+	;actually draw score.  sooo easy with bcd.
+	ld d, $30
+	ld e, $10
+	ld hl, _scorestr
+	call put_numerical_string
 	
 	call fast_puts
+	
 	jp _input_logic
 
 ;code to wrap everything up (clear LCD, return hardware to original state,
@@ -1017,8 +1027,7 @@ _isr:
 	out (3), a
 	ex af, af'
 	exx
-	ei
-	ret
+	jp $0038
 _isr_end:
 	
 ;variable to store key presses
@@ -1060,18 +1069,31 @@ _active_piece_ix:
 _backup_piece:
 	.db 0, 0, 0, 0, 0
 
-;holds the score
+;holds the score in ascii bcd format
 _score:
-	.dw 0, 0
+	.dw 0, 0, 0, 0
 
-;information on how to increase score as level increases
+_scorestr:
+	.dw 0, 0, 0, 0, 0
+
+;information on how to increase score as level increases.  bcd format.
 _score_levelling_table:
-	.dw 0, 100, 300, 500, 800
-
+	.dw $0000, $0000, $0000			;00000
+	.dw	$0000, $0001, $0000			;00100
+	.dw $0000, $0003, $0000			;00300
+	.dw	$0000, $0005, $0000			;00500
+	.dw $0000, $0008, $0000			;00800
+	
 ;table for holding score information
 _scoring_table:
-	.dw 0, 100, 300, 500, 800
+	.dw 0, $0000, $0000, $0000			;00000
+	.dw	0, $0000, $0001, $0000			;00100
+	.dw 0, $0000, $0003, $0000			;00300
+	.dw	0, $0000, $0005, $0000			;00500
+	.dw 0, $0000, $0008, $0000			;00800
 
+_bcd_one:
+	.db 1, 0, 0, 0, 0, 0, 0, 0
 ;other static vars
 _dbcount:
 	.dw 0, 0
@@ -1367,6 +1389,144 @@ _epilouge:
 		pop hl
 	pop de
 	ret
+.endmodule
+
+.module add_byte_bcd
+;adds two arbitrary-length binary coded decimal numbers stored in memory together.
+;ix - holds the pointer to operand 1 lsb.
+;hl - holds the pointer to operand 2 lsb.
+;de - holds the pointer to the result area lsb.
+;b - holds the length of the operands.
+;clobbers all
+add_bcd:
+	scf			;lol clear carry flag.
+	ccf
+_bcd_loop:
+	;do the actual addition
+	ld a, (ix)
+	adc a, (hl)
+	inc ix
+	inc hl
+	cp $0a
+	jr c, _no_carry
+	
+	;do the carry
+	sub $0a
+	ld (de), a		;load result into result space
+	inc de
+	scf				;carry
+	jr _inc_and_loop
+	
+_no_carry:
+	ld (de), a
+	inc de
+	scf
+	ccf
+
+_inc_and_loop:
+	djnz _bcd_loop
+	ret
+	
+.endmodule
+
+.module put_numerical_string
+;routine that prints a numerical string on the screen
+;hl points to the null-terminated string to display.
+;d is the x coord
+;e is the y coord.
+put_numerical_string:
+
+_putloop:
+	ld a, (hl)
+	cp 0
+	ret z
+	
+	;put sprite
+	push hl
+		push de
+			;hl = sprite_table + val(a) * 5
+			add a, -3*16
+			ld b, 0
+			ld c, a
+			ld h, b
+			ld l, c
+			add hl, hl
+			add hl, hl
+			add hl, bc
+			ld bc, _sprite_table
+			add hl, bc
+			ld b, 1
+			ld c, 5
+			call put_sprite
+		pop de
+	pop hl
+	
+	ld a, d
+	add a, 4
+	ld d, a
+	inc hl
+	jr _putloop
+
+_sprite_table:
+.db %01000000		;0
+.db %10100000
+.db %10100000
+.db %10100000
+.db %01000000
+
+.db %01000000		;1
+.db %11000000
+.db %01000000
+.db %01000000
+.db %11100000
+
+.db %11000000		;2
+.db %00100000
+.db %01000000
+.db %10000000
+.db %11100000
+
+.db %11000000
+.db %00100000
+.db %01000000
+.db %00100000
+.db %11000000
+
+.db %10000000
+.db %10100000
+.db %11100000
+.db %00100000
+.db %00100000
+
+.db %11100000
+.db %10000000
+.db %01100000
+.db %00100000
+.db %11000000
+
+.db %01100000
+.db %10000000
+.db %11100000
+.db %10100000
+.db %11100000
+
+.db %11100000
+.db %00100000
+.db %01000000
+.db %10000000
+.db %10000000
+
+.db %11100000
+.db %10100000
+.db %11100000
+.db %10100000
+.db %11100000
+
+.db %11100000
+.db %10100000
+.db %11100000
+.db %00100000
+.db %11000000
 .endmodule
 
 .module rng
