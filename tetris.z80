@@ -600,28 +600,20 @@ _row_clear_loop_again:
 _tabulate_row_points:
 	;use the count of the rows cleared to increment the score accordingly
 	;point hl to the score to add.
-	;ld hl, _scoring_table
-	;ld a, c
-	;add a, a
-	;ld c, a
-	;ld b, 0
-	;add hl, bc
+	ld hl, _scoring_table
+	ld a, c		;multiply c by the size of a single score (8 bytes)
+	add a, a
+	add a, a
+	add a, a
+	ld c, a
+	ld b, 0
+	add hl, bc
 	
-	;load score to add into de
-	;ld a, (hl)
-	;ld e, a
-	;inc hl
-	;ld a, (hl)
-	;ld d, a
-	
-	;add de to the existing score
-	;ld hl, (_score)
-	;add hl, de
-	;ld (_score), hl
-	;ld hl, (_score + 2)
-	;ld de, 0
-	;adc hl, de
-	;ld (_score + 2), hl
+	;set up for bcd add
+	ld ix, _score
+	ld de, _score
+	ld b, 8
+	call add_bcd
 	
 _piece_gen:
 	call rng
@@ -996,7 +988,7 @@ _score_flip_and_ascii_loop:
 	djnz _score_flip_and_ascii_loop
 	
 	;actually draw score.  sooo easy with bcd.
-	ld d, $30
+	ld d, $40
 	ld e, $10
 	ld hl, _scorestr
 	call put_numerical_string
@@ -1078,19 +1070,19 @@ _scorestr:
 
 ;information on how to increase score as level increases.  bcd format.
 _score_levelling_table:
-	.dw $0000, $0000, $0000			;00000
-	.dw	$0000, $0001, $0000			;00100
-	.dw $0000, $0003, $0000			;00300
-	.dw	$0000, $0005, $0000			;00500
-	.dw $0000, $0008, $0000			;00800
+	.db 0, 0, 0, 0, 0, 0, 0, 0			;00000
+	.db 0, 0, 1, 0, 0, 0, 0, 0			;00100
+	.db 0, 0, 3, 0, 0, 0, 0, 0			;00300
+	.db 0, 0, 5, 0, 0, 0, 0, 0			;00500
+	.db 0, 0, 8, 0, 0, 0, 0, 0			;00800
 	
 ;table for holding score information
 _scoring_table:
-	.dw 0, $0000, $0000, $0000			;00000
-	.dw	0, $0000, $0001, $0000			;00100
-	.dw 0, $0000, $0003, $0000			;00300
-	.dw	0, $0000, $0005, $0000			;00500
-	.dw 0, $0000, $0008, $0000			;00800
+	.db 0, 0, 0, 0, 0, 0, 0, 0			;00000
+	.db 0, 0, 1, 0, 0, 0, 0, 0			;00100
+	.db 0, 0, 3, 0, 0, 0, 0, 0			;00300
+	.db 0, 0, 5, 0, 0, 0, 0, 0			;00500
+	.db 0, 0, 8, 0, 0, 0, 0, 0			;00800
 
 _bcd_one:
 	.db 1, 0, 0, 0, 0, 0, 0, 0
