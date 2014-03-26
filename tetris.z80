@@ -37,6 +37,10 @@ up_button_flag .equ 3
 second_button_flag .equ 4
 mode_button_flag .equ 5
 
+down_hold_delay .equ 7
+lr_hold_delay_0 .equ 37
+lr_hold_delay_1 .equ 12
+
 hold_time .equ 60
 
 Y_MAX .equ 63
@@ -172,7 +176,7 @@ _input_logic:
 	;load current time in a
 	ld b, a
 	ld a, (_dbcount)
-	add a, 50
+	add a, lr_hold_delay_0
 	
 	;just unroll the loop
 	bit left_button_flag, b
@@ -186,7 +190,7 @@ _load_db_time:
 	bit down_button_flag, b
 	jr z, _load_times_end
 	ld a, (_dbcount)				;use less time for initial down.
-	add a, 0
+	add a, down_hold_delay
 	ld (_down_time), a
 _load_times_end:
 	
@@ -211,7 +215,7 @@ _load_times_end:
 	or 1 << left_button_flag
 	ld (_proc_keys), a
 	ld a, (_dbcount)
-	add a, 17
+	add a, lr_hold_delay_1
 	ld (_left_time), a
 
 _dont_update_left:
@@ -232,7 +236,7 @@ _dont_update_left:
 	or 1 << right_button_flag
 	ld (_proc_keys), a
 	ld a, (_dbcount)
-	add a, 17
+	add a, lr_hold_delay_1
 	ld (_right_time), a
 	
 _dont_update_right:
@@ -253,7 +257,7 @@ _dont_update_right:
 	or 1 << down_button_flag
 	ld (_proc_keys), a
 	ld a, (_dbcount)
-	add a, 0
+	add a, down_hold_delay
 	ld (_down_time), a
 	
 	;also increment score for soft drop
@@ -291,6 +295,31 @@ _update_keys:
 	
 _update_state:
 	;update internal state: move blocks according to user input
+
+	;calculate frame rate.
+_calc_fps:
+	;if _dbcount > 140  (that is, it's greater than 1 second),
+	;then don't increment the frame counter
+	ld a, (_dbcount)
+	cp 140
+	jr c, _continue_calc_fps
+	ld (_dbcount_prev), a
+	ld a, (_frame_count)
+	ld (_frame_count_prev), a
+	jr _check_second_key
+_continue_calc_fps:
+	;if dbcount rolled over, reset the frame count.
+	ld b, a
+	ld a, (_dbcount_prev)
+	cp b
+	jr c, _calc_fps_no_rollover
+	ld a, 0
+	ld (_frame_count), a
+	ld (_dbcount_prev), a
+_calc_fps_no_rollover:
+	ld a, (_frame_count)
+	inc a
+	ld (_frame_count), a
 	
 _check_second_key:
 	;save active piece state
@@ -1061,11 +1090,16 @@ _right_border_loop:
 	ld (PlotSScreen + (12 * 63) + 6), a
 	ld a, $fE
 	ld (PlotSScreen + (12 * 63) + 7), a
+	
+	;;DEBUG PRINTS!!!!
 	;display initial rng seed value.
 	;ld a, (_db_rng_seed)
 	;ld (PlotSScreen + 1), a
 	;ld a, (_db_rng_seed + 1)
 	;ld (PlotSScreen), a
+	;display FPS
+	ld a, (_frame_count_prev)
+	ld (PlotSScreen), a
 	
 	call fast_puts
 	
@@ -1182,7 +1216,16 @@ _dbcount:
 
 _db_rng_seed:
 	.dw 0, 0
+
+_frame_count:
+	.db 0
+
+_frame_count_prev:
+	.db 0
 	
+_dbcount_prev:
+	.db 0
+
 	.db	$e0, $07
 ;the playing space consists of 
 _wall:
