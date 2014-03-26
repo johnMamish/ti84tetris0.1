@@ -68,9 +68,9 @@ _init:
 	ei
 	
 	;seed RNG using counter on port $35  (should be in use by calc OS) and r
-	in a, ($35)
-	ld b, a
 	ld a, r
+	ld b, a
+	neg
 	ld c, a
 	ld d, 0
 	ld e, 0
@@ -186,7 +186,7 @@ _load_db_time:
 	bit down_button_flag, b
 	jr z, _load_times_end
 	ld a, (_dbcount)				;use less time for initial down.
-	add a, 15
+	add a, 0
 	ld (_down_time), a
 _load_times_end:
 	
@@ -253,7 +253,7 @@ _dont_update_right:
 	or 1 << down_button_flag
 	ld (_proc_keys), a
 	ld a, (_dbcount)
-	add a, 17
+	add a, 0
 	ld (_down_time), a
 	
 	;also increment score for soft drop
@@ -268,7 +268,7 @@ _dont_update_right:
 _update_gravity:
 	;check to apply gravity
 	bit down_button_flag, c		;only do so if the down key is unpressed.
-	jr z, _update_keys			;remember, c contains not of keys.
+	jr z, _reset_grav_timer			;remember, c contains not of keys.
 	ld a, (_dbcount)			
 	ld b, a
 	ld a, (_grav_time)
@@ -278,9 +278,11 @@ _update_gravity:
 	ld a, (_proc_keys)			;move piece down
 	or $01
 	ld (_proc_keys), a
+_reset_grav_timer:
 	ld a, (_dbcount)			;load with next time.
 	add a, 60					;TODO: levelling here.
 	ld (_grav_time), a
+	jr _update_keys
 	
 _update_keys:
 	;update previous keys
@@ -593,10 +595,27 @@ _row_clear_loop_end:
 	jr nz, _row_clear_loop_again
 	ld a, l
 	cp _wall_bottom & $ff
-	jr z, _tabulate_row_points
+	jr z, _tabulate_line_count
 _row_clear_loop_again:
 	djnz _row_clear_loop
 
+_tabulate_line_count:
+	;use the count of the rows cleared to increment the BCD line count
+	push bc
+		ld a, c
+		add a, a
+		add a, a
+		add a, c
+		ld b, 0
+		ld c, a
+		ld hl, _line_table
+		add hl, bc
+		ld ix, _lines_cleared_count
+		ld de, _lines_cleared_count
+		ld b, 5
+		call add_bcd
+	pop bc
+	
 _tabulate_row_points:
 	;use the count of the rows cleared to increment the score accordingly
 	;point hl to the score to add.
@@ -682,18 +701,18 @@ _finish_internal_logic:
 
 _draw:
 	;put return value from detect_collision into someplace
-	ld de, PlotSScreen + 9
-	ld a, l
-	ld (de), a
-	inc de
-	ld a, h
-	ld (de), a
+	;ld de, PlotSScreen + 9
+	;ld a, l
+	;ld (de), a
+	;inc de
+	;ld a, h
+	;ld (de), a
 	
-	ld a, (_dbcount)
-	inc de
-	ld (de), a
-	inc a
-	ld (_dbcount), a
+	;ld a, (_dbcount)
+	;inc de
+	;ld (de), a
+	;inc a
+	;ld (_dbcount), a
 
 	;draw wall data onto plotSScreen
 	ld de, _wall
@@ -993,6 +1012,61 @@ _score_flip_and_ascii_loop:
 	ld hl, _scorestr
 	call put_numerical_string
 	
+	;draw number of lines cleared
+	ld b, 5
+	ld de, _lines_cleared_count
+	ld hl, _lines_cleared_count_string + 4
+_lines_flip_and_ascii_loop:
+	ld a, (de)
+	add a, $30
+	ld (hl), a
+	dec hl
+	inc de
+	djnz _lines_flip_and_ascii_loop
+	
+	;actually draw score.  sooo easy with bcd.
+	ld d, $40
+	ld e, $17
+	ld hl, _lines_cleared_count_string
+	call put_numerical_string
+	
+	;draw borders
+	ld b, Y_MAX + 1
+	ld c, $01
+	ld de, 12
+	ld hl, PlotSScreen + 3
+_left_border_loop:
+	ld a, (hl)
+	or c
+	ld (hl), a
+	add hl, de
+	djnz _left_border_loop
+	
+	ld b, Y_MAX			;last row is covered by bottom border.
+	ld c, $02
+	ld hl, PlotSScreen + 7
+_right_border_loop:
+	ld a, (hl)
+	or c
+	ld (hl), a
+	add hl, de
+	djnz _right_border_loop
+	
+	;bottom border
+	ld a, $ff
+	ld (PlotSScreen + (12 * 63) + 4), a
+	ld a, $ff
+	ld (PlotSScreen + (12 * 63) + 5), a
+	ld a, $ff
+	ld (PlotSScreen + (12 * 63) + 6), a
+	ld a, $fE
+	ld (PlotSScreen + (12 * 63) + 7), a
+	;display initial rng seed value.
+	;ld a, (_db_rng_seed)
+	;ld (PlotSScreen + 1), a
+	;ld a, (_db_rng_seed + 1)
+	;ld (PlotSScreen), a
+	
 	call fast_puts
 	
 	jp _input_logic
@@ -1019,7 +1093,9 @@ _isr:
 	out (3), a
 	ex af, af'
 	exx
-	jp $0038
+	ei
+	ret
+	;jp $0038
 _isr_end:
 	
 ;variable to store key presses
@@ -1062,6 +1138,20 @@ _backup_piece:
 	.db 0, 0, 0, 0, 0
 
 ;holds the score in ascii bcd format
+_level:
+
+_lines_cleared_count:
+	.db 0, 0, 0, 0, 0
+_lines_cleared_count_string:
+	.db 0, 0, 0, 0, 0
+
+_line_table:
+	.db 0, 0, 0, 0, 0
+	.db 1, 0, 0, 0, 0
+	.db 2, 0, 0, 0, 0
+	.db 3, 0, 0, 0, 0
+	.db 4, 0, 0, 0, 0
+	
 _score:
 	.dw 0, 0, 0, 0
 
@@ -1090,10 +1180,13 @@ _bcd_one:
 _dbcount:
 	.dw 0, 0
 
-	.db	$e0, $07
+_db_rng_seed:
+	.dw 0, 0
+	
 	.db	$e0, $07
 ;the playing space consists of 
 _wall:
+	.db	$e0, $07
 	.db	$e0, $07		;1
 	.db	$e0, $07
 	.db	$e0, $07
@@ -1713,7 +1806,7 @@ _colloop:
 	ld a, $80		;set column
 	out ($10), a	
 	call $000b		
-	ld b, 63
+	ld b, 64
 	ld de, 12
 	
 _pixelloop:			;TODO: see if we can replace call $000b with useful stuff.
@@ -1726,7 +1819,7 @@ _pixelloop:			;TODO: see if we can replace call $000b with useful stuff.
 	djnz _pixelloop
 	
 	;move hl back to start and one col over
-	ld de, -(12 * 63) + 1
+	ld de, -(12 * 64) + 1
 	add hl, de
 	jr _colloop
 	
