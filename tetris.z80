@@ -45,6 +45,7 @@ hold_time .equ 60
 
 Y_MAX .equ 63
 X_MAX .equ 95
+MAX_LEVEL .equ 10
 
 _init:
 	di
@@ -71,13 +72,20 @@ _init:
 	im 2
 	ei
 	
-	;seed RNG using counter on port $35  (should be in use by calc OS) and r
-	ld a, r
+	;seed RNG using b_call to calculator's random number generator
+	b_call(_Random)
+	ld a, (OP1 + 2)
 	ld b, a
-	neg
+	ld (_db_rng_seed + 0), a
+	ld a, (OP1 + 3)
 	ld c, a
-	ld d, 0
-	ld e, 0
+	ld (_db_rng_seed + 1), a
+	ld a, (OP1 + 4)
+	ld d, a
+	ld (_db_rng_seed + 2), a
+	ld a, (OP1 + 5)
+	ld e, a
+	ld (_db_rng_seed + 3), a
 	call seed_rng
 	ld b, 60
 _rng_loop:
@@ -87,20 +95,24 @@ _rng_loop:
 	djnz _rng_loop
 	
 	;init game vars
-	;select active piece randomly
+	;generate 7 random pieces.
 _piece_gen_0:
-	call rng
-	call rng
+	ld a, 0
+	ld (_rand_bag_count), a
+	ld hl, _rand_bag_list
+	call generate_7_random
 	
-	;e contains a random number.  get just the top three bits
-	srl e
-	srl e
-	srl e
-	srl e
-	srl e
-	ld a, e
-	cp $07
-	jr z, _piece_gen_0
+	;get the first piece of the "random bag" in de.
+	ld a, (_rand_bag_count)
+	ld b, a
+	inc a
+	ld (_rand_bag_count), a
+	ld l, b
+	ld h, 0
+	ld de, _rand_bag_list
+	add hl, de
+	ld a, (hl)
+	ld e, a
 	ld d, 0
 	
 	;multiply de * 20 -> hl
@@ -124,6 +136,24 @@ _piece_gen_0:
 	ld (_active_pos_x), a
 	
 _input_logic:
+	;;DEBUG CODE!!!!
+	;pressing '0' will increment the lines you've cleared without giving points
+	ld a, $ef
+	out (1), a
+	nop
+	nop
+	in a, (1)
+	bit 0, a
+	jr nz, _no_cheat_inc
+	
+	;increment line
+	ld ix, _lines_cleared_count
+	ld de, _lines_cleared_count
+	ld hl, _bcd_one
+	ld b, 5
+	call add_bcd
+	
+_no_cheat_inc:	
 	;read in arrow keys
 	ld a, $fe
 	out (1), a
@@ -283,8 +313,18 @@ _update_gravity:
 	or $01
 	ld (_proc_keys), a
 _reset_grav_timer:
-	ld a, (_dbcount)			;load with next time.
-	add a, 60					;TODO: levelling here.
+	;get delay for current level.
+	ld a, (_level_bin)
+	ld h, 0
+	ld l, a
+	ld de, _level_delays
+	add hl, de
+	ld a, (hl)
+	ld b, a
+	
+	;add delay for level to current time.
+	ld a, (_dbcount)
+	add a, b
 	ld (_grav_time), a
 	jr _update_keys
 	
@@ -663,19 +703,22 @@ _tabulate_row_points:
 	ld b, 8
 	call add_bcd
 	
-_piece_gen:
-	call rng
-	call rng
+	;now that the score and line count have been adjusted accordingly, adjust
+	;the player's level accordingly.
+	call _test_level
 	
-	;e contains a random number.  get just the top three bits
-	srl e
-	srl e
-	srl e
-	srl e
-	srl e
-	ld a, e
-	cp $07
-	jr z, _piece_gen
+_piece_gen:
+	;get next piece from "random bag" in de
+	ld a, (_rand_bag_count)
+	ld b, a
+	inc a
+	ld (_rand_bag_count), a
+	ld l, b
+	ld h, 0
+	ld de, _rand_bag_list
+	add hl, de
+	ld a, (hl)
+	ld e, a
 	ld d, 0
 	
 	;multiply de * 20 -> hl
@@ -687,7 +730,7 @@ _piece_gen:
 	add hl, hl
 	add hl, hl
 	ld de, _pieces
-	add hl, de
+	add hl, de			;add piece index.
 	ld (_active_piece), hl
 	ld a, 0
 	ld (_active_piece_ix), a
@@ -697,7 +740,18 @@ _piece_gen:
 	ld (_active_pos_y), a
 	ld a, 5
 	ld (_active_pos_x), a
-
+	
+	;if _bag_list_count < 7, don't generate new pieces.
+	ld a, (_rand_bag_count)
+	cp 7
+	jr c, _block_out_test
+	
+	;generate 7 new pieces.
+	ld a, 0
+	ld (_rand_bag_count), a
+	ld hl, _rand_bag_list
+	call generate_7_random
+	
 _block_out_test:
 	;if we have just generated a new piece and it is colliding with existing
 	;pieces, then we have a block out condition and the player loses.
@@ -1053,10 +1107,28 @@ _lines_flip_and_ascii_loop:
 	inc de
 	djnz _lines_flip_and_ascii_loop
 	
-	;actually draw score.  sooo easy with bcd.
+	;actually draw line count.  sooo easy with bcd.
 	ld d, $40
 	ld e, $17
 	ld hl, _lines_cleared_count_string
+	call put_numerical_string
+	
+	;draw level
+	ld b, 2
+	ld de, _level_bcd
+	ld hl, _level_bcd_string + 1
+_level_flip_and_ascii_loop:
+	ld a, (de)
+	add a, $30
+	ld (hl), a
+	dec hl
+	inc de
+	djnz _level_flip_and_ascii_loop
+	
+	;actually draw level.  sooo easy with bcd.
+	ld d, $40
+	ld e, $1d
+	ld hl, _level_bcd_string
 	call put_numerical_string
 	
 	;draw borders
@@ -1094,12 +1166,41 @@ _right_border_loop:
 	;;DEBUG PRINTS!!!!
 	;display initial rng seed value.
 	;ld a, (_db_rng_seed)
-	;ld (PlotSScreen + 1), a
+	;ld (PlotSScreen + 12*25), a
 	;ld a, (_db_rng_seed + 1)
-	;ld (PlotSScreen), a
+	;ld (PlotSScreen + 12*25 + 1), a
+	;ld a, (_db_rng_seed + 2)
+	;ld (PlotSScreen + 12*25 + 2), a
+	;ld a, (_db_rng_seed + 3)
+	;ld (PlotSScreen + 12*25 + 3), a
+	
 	;display FPS
 	ld a, (_frame_count_prev)
 	ld (PlotSScreen), a
+	
+	;display random bag on the screen
+	ld a, (_rand_bag_count)
+	ld l, a
+	ld h, 0
+	ld de, _rand_bag_list
+	add hl, de
+	ex de, hl
+	ld b, a
+	ld a, 7
+	sub b
+	;a now contains the number of loops to do
+	ld b, a
+	ld hl, PlotSScreen + 2*12
+_rand_bag_draw_loop
+	ld a, (de)
+	ld (hl), a
+	push bc
+		ld b, 0
+		ld c, 12
+		add hl, bc
+	pop bc
+	inc de
+	djnz _rand_bag_draw_loop
 	
 	call fast_puts
 	
@@ -1113,6 +1214,89 @@ _endgame:
 	ei
 	ret
 
+;levelling routine.  Has global vars.
+_test_level:
+	;first check to see if we've reached the max level or not.  If we have,
+	;then just ret
+	ld a, (_level_bin)
+	cp MAX_LEVEL	;length of score table plus 1
+	ret nc
+	
+	;we haven't maxed out the level, so increment the level if we've reached
+	;the threshold for the next level.
+	;in order to do this, we first need to point hl to the msb of the
+	;requirement to reach the next level.
+	ld b, a
+	add a, a		;a = level * 5
+	add a, a
+	add a, b
+	ld l, a
+	ld h, 0
+	ld de, _levelling_table
+	add hl, de
+	ld e, 4			;length of levelling table elements minus one.
+	ld d, 0
+	add hl, de
+	
+	;we want to compare the number pointed by hl to the number of lines
+	;cleared, so we need to point de to the msb of the number of lines cleared.
+	ld d, h
+	ld e, l
+	ld hl, _lines_cleared_count + 4
+	
+	;compare bcd pointed by hl to bcd pointed by de.
+	ld b, 5
+	call bcd_compare
+	
+	;if the result of the compare was not -1, level up.
+	cp $ff
+	ret z
+	
+	;level up
+	;increment level binary
+	ld a, (_level_bin)
+	inc a
+	ld (_level_bin), a
+	
+	;increment level bcd
+	ld hl, _bcd_one
+	ld ix, _level_bcd
+	ld de, _level_bcd
+	ld b, 2
+	call add_bcd
+	
+	;TODO: increment level points earned for line clear
+	;increase points awarded for line clear
+	ld de, _scoring_table + 8
+	ld hl, _score_levelling_table + 8
+	ld ix, _scoring_table + 8
+	ld b, 4
+_increment_score_table_loop:
+	push bc
+		ld b, 8
+		push hl
+			push ix
+				push de
+					call add_bcd
+				pop de
+			pop ix
+		pop hl
+		ld b, 0
+		ld c, 8
+		add hl, bc
+		add ix, bc
+		push hl
+			push de
+			pop hl
+			add hl, bc
+			push hl
+			pop de
+		pop hl
+	pop bc
+	djnz _increment_score_table_loop
+	
+	ret
+	
 ;isr for counting shit.  Counts _dbcount
 _isr:
 	ex af, af'
@@ -1171,9 +1355,39 @@ _active_piece_ix:
 _backup_piece:
 	.db 0, 0, 0, 0, 0
 
-;holds the score in ascii bcd format
-_level:
+;variables to keep track of piece generation information
+;list of 7 pieces
+_rand_bag_list:
+	.db 0, 0, 0, 0, 0, 0, 0
 
+;pointer to list of 7 pieces
+_rand_bag_count:
+	.db 0
+
+;holds the score in bcd format
+_level_bcd:
+	.db 1, 0
+_level_bcd_string:
+	.db 0, 0, 0
+	
+_level_bin:
+	.db 0
+
+_levelling_table:
+	.db 0, 1, 0, 0, 0
+	.db 0, 2, 0, 0, 0
+	.db 0, 3, 0, 0, 0
+	.db 0, 4, 0, 0, 0
+	.db 0, 5, 0, 0, 0
+	.db 0, 6, 0, 0, 0
+	.db 0, 7, 0, 0, 0
+	.db 5, 8, 0, 0, 0
+	.db 0, 0, 1, 0, 0
+	.db 0, 2, 1, 0, 0
+
+_level_delays:
+	.db 70, 63, 56, 49, 42, 35, 30, 26, 22, 19, 16, 14
+	
 _lines_cleared_count:
 	.db 0, 0, 0, 0, 0
 _lines_cleared_count_string:
@@ -1519,7 +1733,7 @@ _epilouge:
 	ret
 .endmodule
 
-.module add_byte_bcd
+.module byte_bcd_functions
 ;adds two arbitrary-length binary coded decimal numbers stored in memory together.
 ;ix - holds the pointer to operand 1 lsb.
 ;hl - holds the pointer to operand 2 lsb.
@@ -1553,6 +1767,35 @@ _no_carry:
 
 _inc_and_loop:
 	djnz _bcd_loop
+	ret
+
+;compares two arbitrary-length binary coded decimal numbers.
+;hl points to msb of A
+;de points to msb of B
+;a equals 1 if A > B, a equals -1 if A < B, a equals 0 if A == B.
+;b holds the lengths of the numbers to compare.
+bcd_compare:
+
+_loop:
+	ld a, (hl)
+	ld c, a
+	ld a, (de)
+	sub c
+	jr c, _A_greater_B
+	cp 0
+	jr nz, _A_less_B
+	dec hl
+	dec de
+	djnz _loop
+	ld a, 0
+	ret
+
+_A_greater_B:
+	ld a, 1
+	ret
+
+_A_less_B:
+	ld a, $ff
 	ret
 	
 .endmodule
@@ -1628,7 +1871,7 @@ _sprite_table:
 
 .db %11100000
 .db %10000000
-.db %01100000
+.db %11000000
 .db %00100000
 .db %11000000
 
@@ -1672,7 +1915,7 @@ seed_rng:
 
 ;generate random number and return it in bcde
 ;uses a linear feedback shift register with taps at bits 31, 29, 25, and 24
-;(where bit 31 is msb (bit 7 of b))
+;(where bit 31 is lsb (bit 0 of e))
 rng:
 	ld a, (_num)
 	ld e, a
@@ -1683,22 +1926,24 @@ rng:
 	ld a, (_num + 3)
 	ld b, a
 	
-	ld h, b
+	ld h, e
 	;shift
-	ld a, h		;bit 24 in a's lsb
-	srl h		;bit 25 in h's lsb
-	xor h		;xnor
-	xor $ff
+	ld a, h		;bit 32 in a's lsb
+	ld h, d
+	srl h
+	srl h		;bit 22 in h's lsb
+	xor h		;xor
+	
+	ld h, b
 	srl h
 	srl h
 	srl h
 	srl h
-	xor h		;bit 29 in h's lsb
-	xor $ff
 	srl h
-	srl h		;bit 31 in h's lsb
-	xor h		;a contains bit to add
-	xor $ff
+	srl h		;bit 2 in h's lsb
+	xor h
+	srl h		;bit 1 in h's lsb
+	xor h
 	
 	;shift a into 32 bits.
 	srl a
@@ -1720,6 +1965,81 @@ rng:
 	
 _num:
 	.dw 0, 0
+
+;generates 7 unique random numbers from 0 to 6 (should generalize this) and
+;puts them in the memory location pointed by hl
+generate_7_random:
+	;fill the list of random numbers
+	ld de, _starting_list
+	ld b, 7
+	ld a, 0
+_fill_starting_list_loop:
+	ld (de), a
+	inc a
+	inc de
+	djnz _fill_starting_list_loop
+	
+	;now, move numbers from that list to the destination randomly
+	ld a, 6
+_shuffle_loop:
+	;generate a random number until its less than or equal to a
+	push af
+		push hl
+			call rng
+		pop hl
+		;result equals result mod 8
+		ld a, e
+		and $07
+		ld e, a
+	pop af
+	cp e
+	jr c, _shuffle_loop			;redo if the generated number (mod 8) is > a.
+	
+	;e contains the random number.  Save in b.
+	ld b, e
+	ld de, _starting_list
+	push af
+	;cool.  We have a valid random number in b.  Now we need to go that far through
+	;the list, skipping over zeroes
+_list_zero_skip:
+		ld a, (de)
+		cp $ff
+		jr nz, _dont_skip_element
+		inc de
+		jr _list_zero_skip
+
+_dont_skip_element:
+		;if the list thing wasn't zero, it counts for something, so decrement b
+		;and increment the list index.
+		dec b
+		bit 7, b
+		jr nz, _list_zero_skip_done
+		inc de
+		jr _list_zero_skip
+
+_list_zero_skip_done:	
+		;de now points to the element of the list that we want to copy to the
+		;result list.
+		ld a, (de)
+		
+		;store the selected number in the results list.
+		ld (hl), a
+		
+		;clear that entry in the selection list
+		ld a, $ff
+		ld (de), a
+		
+		;move on to next array index
+		inc de
+		inc hl
+	pop af
+	dec a
+	bit 7, a
+	jr z, _shuffle_loop		;go back to top if a is non-negative.
+	ret
+	
+_starting_list:
+	.db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 .endmodule
 
 .module put_sprite
