@@ -43,11 +43,19 @@ lr_hold_delay_1 .equ 12
 
 hold_time .equ 60
 
+texties .equ $fb2e - (5 * $30)
+
 Y_MAX .equ 63
 X_MAX .equ 95
 MAX_LEVEL .equ 10
 
 _init:
+	;;DEBUG CODE!
+	;;CHECK OUT $6201
+	;;$3b33
+	ld hl, _pause_string
+	b_call(_VPutMap)
+	
 	di
 	;initialize timing interrupts
 	;install IVT
@@ -136,6 +144,44 @@ _piece_gen_0:
 	ld (_active_pos_x), a
 	
 _input_logic:
+	;check for pause
+	ld a, $f7
+	out (1), a
+	nop
+	nop
+	in a, (1)
+	ld b, a			;code that records pause previous expects reg b.
+	bit 3, a
+	jr nz, _no_pause_invert
+	ld a, (_pause_prev)
+	bit 3, a
+	jr z, _no_pause_invert
+	
+	;invert pause 
+	ld a, (_pause_flag)
+	xor $ff
+	ld (_pause_flag), a
+	
+	;save/restore _dbcount if need be
+	;if pause flag is off, restore dbcount
+	cp 0
+	jr z, _restore_dbcount	;otherwise, save it.
+	ld a, (_dbcount)
+	ld (_dbcount_backup), a
+	jr _no_pause_invert
+_restore_dbcount:
+	ld a, (_dbcount_backup)
+	ld (_dbcount), a
+	
+_no_pause_invert:
+	ld a, b
+	ld (_pause_prev), a
+	
+	;check pause
+	ld a, (_pause_flag)
+	cp 0
+	jp nz, _finish_internal_logic
+	
 	;;DEBUG CODE!!!!
 	;pressing '0' will increment the lines you've cleared without giving points
 	ld a, $ef
@@ -153,7 +199,7 @@ _input_logic:
 	ld b, 5
 	call add_bcd
 	
-_no_cheat_inc:	
+_no_cheat_inc:
 	;read in arrow keys
 	ld a, $fe
 	out (1), a
@@ -783,6 +829,11 @@ _finish_internal_logic:
 	
 
 _draw:
+	;check to see if we are paused.  if so, don't draw too much.
+	ld a, (_pause_flag)
+	cp 0
+	jp nz, _draw_pause
+	
 	;put return value from detect_collision into someplace
 	;ld de, PlotSScreen + 9
 	;ld a, l
@@ -1076,6 +1127,16 @@ _big_sprite_bit_loop_done:
 	inc hl
 	djnz _big_sprite_byte_loop
 	
+	;jump over drawing pause
+	jp _draw_score
+	;TODO: draw the word "pause"
+_draw_pause:
+	ld d, $20
+	ld e, $25
+	ld hl, _pause_string
+	call put_numerical_string
+	
+_draw_score:
 	;draw score
 	;Translate bcd number at _score to a string.  Pretty easy, really.
 	ld b, 8
@@ -1202,7 +1263,7 @@ _rand_bag_draw_loop
 	inc de
 	djnz _rand_bag_draw_loop
 	
-	call fast_puts
+	call fast_putscreen
 	
 	jp _input_logic
 
@@ -1303,6 +1364,7 @@ _isr:
 	exx
 	xor a		;disable hardware
 	out (3), a
+	
 	ld hl, (_dbcount)
 	inc hl
 	ld (_dbcount), hl
@@ -1313,7 +1375,6 @@ _isr:
 	exx
 	ei
 	ret
-	;jp $0038
 _isr_end:
 	
 ;variable to store key presses
@@ -1339,6 +1400,14 @@ _grav_time:
 _stickies:
 	.db 0
 
+;pause button
+_pause_prev:
+	.db 0
+_pause_flag:
+	.db 0
+_dbcount_backup:
+	.db 0
+	
 ;variables to store piece states
 _active_pos_x:
 	.db 0
@@ -1634,6 +1703,9 @@ _big_block_sprite:
 	.db %11100000
 	.db %10100000
 	.db %11100000
+
+_pause_string:
+	.db "paused\0"
 	
 .module detect_collision
 	;TODO: test for x = 0 and x > 15.
@@ -1825,6 +1897,7 @@ _putloop:
 			add hl, hl
 			add hl, bc
 			ld bc, _sprite_table
+			;ld bc, texties
 			add hl, bc
 			ld b, 1
 			ld c, 5
@@ -1913,10 +1986,11 @@ seed_rng:
 	ld (_num + 3), a
 	ret
 
-;generate random number and return it in bcde
-;uses a linear feedback shift register with taps at bits 31, 29, 25, and 24
-;(where bit 31 is lsb (bit 0 of e))
+;generate random number and return it in bcde <msb> - <lsb>
+;uses an xnor linear feedback shift register with taps at bits 31, 21, 1, and 0
+;NB!!!!!: (where bit 31 is lsb (bit 0 of e))
 rng:
+	;load global var "_num" into bcde.
 	ld a, (_num)
 	ld e, a
 	ld a, (_num + 1)
@@ -1926,13 +2000,15 @@ rng:
 	ld a, (_num + 3)
 	ld b, a
 	
+	;use register a to hold the bit to shift into the top.
 	ld h, e
 	;shift
-	ld a, h		;bit 32 in a's lsb
+	ld a, h		;get bit 31 in a's lsb
 	ld h, d
 	srl h
-	srl h		;bit 22 in h's lsb
-	xor h		;xor
+	srl h		;bit 21 in h's lsb
+	xor h		;xnor
+	xor 1
 	
 	ld h, b
 	srl h
@@ -1940,10 +2016,12 @@ rng:
 	srl h
 	srl h
 	srl h
-	srl h		;bit 2 in h's lsb
-	xor h
 	srl h		;bit 1 in h's lsb
 	xor h
+	xor 1
+	srl h		;bit 0 in h's lsb
+	xor h
+	xor 1
 	
 	;shift a into 32 bits.
 	srl a
@@ -2152,8 +2230,8 @@ _done_with_line:
 	ret
 .endmodule
 
-.module fast_puts
-fast_puts:
+.module fast_putscreen
+fast_putscreen:
 	ld hl, PlotSScreen
 	ld c, $20-1		;c holds column number
 	
