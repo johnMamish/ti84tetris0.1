@@ -1097,7 +1097,7 @@ _big_sprite_bit_loop:
 					ld b, 1
 					ld c, 3
 					call put_sprite
-					pop af
+				pop af
 			pop de
 		pop bc
 	pop hl
@@ -1135,6 +1135,10 @@ _draw_pause:
 	ld e, $25
 	ld hl, _pause_string
 	call put_numerical_string
+
+;draw the next piece
+_next_piece_draw_loop:
+
 	
 _draw_score:
 	;draw score
@@ -1252,7 +1256,7 @@ _right_border_loop:
 	;a now contains the number of loops to do
 	ld b, a
 	ld hl, PlotSScreen + 2*12
-_rand_bag_draw_loop
+_rand_bag_draw_loop:
 	ld a, (de)
 	ld (hl), a
 	push bc
@@ -1270,6 +1274,11 @@ _rand_bag_draw_loop
 ;code to wrap everything up (clear LCD, return hardware to original state,
 ;etc).  This will probably be located elsewhere in later editions of the game.
 _endgame:
+	;clear the lcd screen.  ~$a430
+	call clear_graph_buffer
+	call fast_putscreen
+	
+	;return to interrupt mode 1
 	di
 	im 1
 	ei
@@ -1706,7 +1715,7 @@ _big_block_sprite:
 
 _pause_string:
 	.db "paused\0"
-	
+
 .module detect_collision
 	;TODO: test for x = 0 and x > 15.
 	;args
