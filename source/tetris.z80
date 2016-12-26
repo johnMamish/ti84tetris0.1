@@ -1,0 +1,2303 @@
+;Calling convention
+;ix points to the base of a frame
+;sp points to the top of the current frame
+;
+;
+;
+;
+;
+;return space
+;--------
+;args
+;--------
+;caller
+;--------
+
+;overview of main loop:
+;collect user input
+;poll timer
+;update internal state according to user input and timer
+;display internal state
+
+.nolist
+	#include 	"ti83plus.inc"
+.list
+
+.org $9d95 - 2
+.db t2ByteTok, tAsmCmp
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;defines
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;Bit numbers for the button flags.
+down_button_flag .equ 0
+left_button_flag .equ 1
+right_button_flag .equ 2
+up_button_flag .equ 3
+second_button_flag .equ 4
+mode_button_flag .equ 5
+
+down_hold_delay .equ 7
+lr_hold_delay_0 .equ 37
+lr_hold_delay_1 .equ 12
+
+hold_time .equ 60
+
+texties .equ $fb2e - (5 * $30)
+
+Y_MAX .equ 63
+X_MAX .equ 95
+MAX_LEVEL .equ 10
+
+_init:
+	;;DEBUG CODE!
+	;;CHECK OUT $6201
+	;;$3b33
+	ld hl, _pause_string
+	bcall(_VPutMap)
+	
+	di
+	;initialize timing interrupts
+	;install IVT
+	ld a, $9a
+	ld i, a
+	ld h, a
+	ld l, 0
+	ld (hl), $99
+	push hl
+	pop de
+	inc de
+	ld bc, $100
+	ldir
+	
+	;put isr at $9999
+	ld hl, _isr
+	ld de, $9999
+	ld bc, _isr_end - _isr
+	ldir
+	
+	;enable interrupts
+	im 2
+	ei
+	
+	;seed RNG using b_call to calculator's random number generator
+	bcall(_Random)
+	ld a, (OP1 + 2)
+	ld b, a
+	ld (_db_rng_seed + 0), a
+	ld a, (OP1 + 3)
+	ld c, a
+	ld (_db_rng_seed + 1), a
+	ld a, (OP1 + 4)
+	ld d, a
+	ld (_db_rng_seed + 2), a
+	ld a, (OP1 + 5)
+	ld e, a
+	ld (_db_rng_seed + 3), a
+	call seed_rng
+	ld b, 60
+_rng_loop:
+	push bc
+		call rng
+	pop bc
+	djnz _rng_loop
+	
+	;init game vars
+	;generate 7 random pieces.
+_piece_gen_0:
+	ld a, 0
+	ld (_rand_bag_count), a
+	ld hl, _rand_bag_list
+	call generate_7_random
+	
+	;get the first piece of the "random bag" in de.
+	ld a, (_rand_bag_count)
+	ld b, a
+	inc a
+	ld (_rand_bag_count), a
+	ld l, b
+	ld h, 0
+	ld de, _rand_bag_list
+	add hl, de
+	ld a, (hl)
+	ld e, a
+	ld d, 0
+	
+	;multiply de * 20 -> hl
+	ld h, d
+	ld l, e
+	add hl, hl
+	add hl, hl
+	add hl, de
+	add hl, hl
+	add hl, hl
+	ld de, _pieces
+	add hl, de
+	ld (_active_piece), hl
+	ld a, 0
+	ld (_active_piece_ix), a
+	
+	;start coordinates
+	ld a, $00
+	ld (_active_pos_y), a
+	ld a, 5
+	ld (_active_pos_x), a
+	
+_input_logic:
+	;check for pause
+	ld a, $f7
+	out (1), a
+	nop
+	nop
+	in a, (1)
+	ld b, a			;code that records pause previous expects reg b.
+	bit 3, a
+	jr nz, _no_pause_invert
+	ld a, (_pause_prev)
+	bit 3, a
+	jr z, _no_pause_invert
+	
+	;invert pause 
+	ld a, (_pause_flag)
+	xor $ff
+	ld (_pause_flag), a
+	
+	;save/restore _dbcount if need be
+	;if pause flag is off, restore dbcount
+	cp 0
+	jr z, _restore_dbcount	;otherwise, save it.
+	ld a, (_dbcount)
+	ld (_dbcount_backup), a
+	jr _no_pause_invert
+_restore_dbcount:
+	ld a, (_dbcount_backup)
+	ld (_dbcount), a
+	
+_no_pause_invert:
+	ld a, b
+	ld (_pause_prev), a
+	
+	;check pause
+	ld a, (_pause_flag)
+	cp 0
+	jp nz, _finish_internal_logic
+	
+	;;DEBUG CODE!!!!
+	;pressing '0' will increment the lines you've cleared without giving points
+	ld a, $ef
+	out (1), a
+	nop
+	nop
+	in a, (1)
+	bit 0, a
+	jr nz, _no_cheat_inc
+	
+	;increment line
+	ld ix, _lines_cleared_count
+	ld de, _lines_cleared_count
+	ld hl, _bcd_one
+	ld b, 5
+	call add_bcd
+	
+_no_cheat_inc:
+	;read in arrow keys
+	ld a, $fe
+	out (1), a
+	nop
+	nop
+	in a, (1)
+	ld c, $f0
+	or c
+	
+	;store arrow keys in register b
+	ld b, a
+	
+	;read other keys (2nd for clockwise rotate and mode for counterclockwise)
+	ld a, $bf
+	out (1), a
+	nop
+	nop
+	in a, (1)
+	
+	;DEL button insta-quits
+	bit 7, a
+	jp z, _endgame
+	
+	;store 2nd and mode keys in proper bits in b
+	scf			;need to set carry flag so that msb of a is filled with a 1
+	rr a		;when we rotate right.
+	ld c, %11001111
+	or c
+	and b
+	ld c, a			;store non-inverted keys for later in register c
+	
+	;TODO: calculate timing.  For now, we just set the flags to process key
+	;presses on the rising/falling edges.  Detect previous by doing
+	;~prev & current (because keys are read as active low, this will look like
+	;prev & ~current
+	xor $ff			;invert current keys
+	ld b, a			;load into register b
+	
+	;read in previous keys to check for falling edges.  All keys that went from
+	;high to low will have a 1 at their flag.
+	ld a, (_keys_prev)
+	and b
+	ld (_proc_keys), a
+	
+	;set timers for keys with rising edges.  (N.B. though the key hardware
+	;us falling edges, register a contains rising edges)
+	;for i = 0 to 2
+	;	if(a[i]  (the bit, that is))
+	;		key_timers[i] = current time + time until fast move
+	;load current time in a
+	ld b, a
+	ld a, (_dbcount)
+	add a, lr_hold_delay_0
+	
+	;just unroll the loop
+	bit left_button_flag, b
+	jr z, _load_rb_time
+	ld (_left_time), a
+_load_rb_time:
+	bit right_button_flag, b
+	jr z, _load_db_time
+	ld (_right_time), a
+_load_db_time:
+	bit down_button_flag, b
+	jr z, _load_times_end
+	ld a, (_dbcount)				;use less time for initial down.
+	add a, down_hold_delay
+	ld (_down_time), a
+_load_times_end:
+	
+	;update "stickies."  If we had a falling edge, we will sticky the
+	;corresponding key and unsticky keys that are mutually exclusive.
+	
+	
+	;Update timing.  Check each timer to see if we need to set the update flags for held keys
+	ld a, (_dbcount)
+	ld b, a
+	ld a, c						;c contains non inverted key presses
+	xor $ff
+	bit left_button_flag, a
+	jr z, _dont_update_left
+	ld a, (_left_time)
+	sub b
+	bit 7, a
+	jr z, _dont_update_left
+	
+	;made it this far, so we should update left
+	ld a, (_proc_keys)
+	or 1 << left_button_flag
+	ld (_proc_keys), a
+	ld a, (_dbcount)
+	add a, lr_hold_delay_1
+	ld (_left_time), a
+
+_dont_update_left:
+	;Update timing.  Check each timer to see if we need to set the update flags for held keys
+	ld a, (_dbcount)
+	ld b, a
+	ld a, c						;c contains non inverted key presses
+	xor $ff
+	bit right_button_flag, a
+	jr z, _dont_update_right
+	ld a, (_right_time)
+	sub b
+	bit 7, a
+	jr z, _dont_update_right
+	
+	;made it this far, so we should update left
+	ld a, (_proc_keys)
+	or 1 << right_button_flag
+	ld (_proc_keys), a
+	ld a, (_dbcount)
+	add a, lr_hold_delay_1
+	ld (_right_time), a
+	
+_dont_update_right:
+	;Update timing.  Check each timer to see if we need to set the update flags for held keys
+	ld a, (_dbcount)
+	ld b, a
+	ld a, c						;c contains non inverted key presses
+	xor $ff
+	bit down_button_flag, a
+	jr z, _update_gravity
+	ld a, (_down_time)
+	sub b
+	bit 7, a
+	jr z, _update_gravity
+	
+	;made it this far, so we should update down
+	ld a, (_proc_keys)
+	or 1 << down_button_flag
+	ld (_proc_keys), a
+	ld a, (_dbcount)
+	add a, down_hold_delay
+	ld (_down_time), a
+	
+	;also increment score for soft drop
+	ld ix, _score
+	ld hl, _bcd_one
+	ld de, _score
+	ld b, 8
+	push bc
+		call add_bcd
+	pop bc
+	
+_update_gravity:
+	;check to apply gravity
+	bit down_button_flag, c		;only do so if the down key is unpressed.
+	jr z, _reset_grav_timer			;remember, c contains not of keys.
+	ld a, (_dbcount)			
+	ld b, a
+	ld a, (_grav_time)
+	sub b						;if next time - current time < 0, we can
+	bit 7, a					;move the piece down.
+	jr z, _update_keys
+	ld a, (_proc_keys)			;move piece down
+	or $01
+	ld (_proc_keys), a
+_reset_grav_timer:
+	;get delay for current level.
+	ld a, (_level_bin)
+	ld h, 0
+	ld l, a
+	ld de, _level_delays
+	add hl, de
+	ld a, (hl)
+	ld b, a
+	
+	;add delay for level to current time.
+	ld a, (_dbcount)
+	add a, b
+	ld (_grav_time), a
+	jr _update_keys
+	
+_update_keys:
+	;update previous keys
+	ld a, c
+	ld (_keys_prev), a
+	
+_update_state:
+	;update internal state: move blocks according to user input
+
+	;calculate frame rate.
+_calc_fps:
+	;if _dbcount > 140  (that is, it's greater than 1 second),
+	;then don't increment the frame counter
+	ld a, (_dbcount)
+	cp 140
+	jr c, _continue_calc_fps
+	ld (_dbcount_prev), a
+	ld a, (_frame_count)
+	ld (_frame_count_prev), a
+	jr _check_second_key
+_continue_calc_fps:
+	;if dbcount rolled over, reset the frame count.
+	ld b, a
+	ld a, (_dbcount_prev)
+	cp b
+	jr c, _calc_fps_no_rollover
+	ld a, 0
+	ld (_frame_count), a
+	ld (_dbcount_prev), a
+_calc_fps_no_rollover:
+	ld a, (_frame_count)
+	inc a
+	ld (_frame_count), a
+	
+_check_second_key:
+	;save active piece state
+	ld hl, _active_pos_x
+	ld de, _backup_piece
+	ld bc, $0005
+	ldir
+	
+	;move piece and check for collision
+	ld a, (_proc_keys)
+	ld b, a
+	bit second_button_flag, b
+	jr z, _check_left_key
+	
+	ld hl, (_active_piece)
+	ld de, 4
+	add hl, de
+	ld a, (hl)
+	cp $ff
+	jr nz, _second_store_rotation
+	ld de, -16
+	add hl, de
+_second_store_rotation:
+	ld (_active_piece), hl
+	
+	push ix
+		ld hl, (_active_pos_x)		;arg2
+		push hl
+			ld hl, _active_piece	;arg1
+			push hl
+				ld hl, _wall		;arg0
+				push hl
+					push hl			;return space
+						call detect_collision
+					pop hl			;return value
+				pop af				;get rid of stack space for agrs
+			pop af
+		pop af
+	pop ix	
+	
+	;if there wasn't a collision, don't restore the previous state
+	ld a, l
+	cp 0
+	jr z, _check_left_key
+	
+	;restore previous state
+	ld de, _active_pos_x
+	ld hl, _backup_piece
+	ld bc, $0005
+	ldir
+	
+	;for each direction, perform the action if it doesn't cause a collision
+_check_left_key:
+	;save active piece state
+	ld hl, _active_pos_x
+	ld de, _backup_piece
+	ld bc, $0005
+	ldir
+	
+	;move piece and check for collision
+	ld a, (_proc_keys)
+	ld b, a
+	bit left_button_flag, b
+	jr z, _check_right_key
+	ld a, (_active_pos_x)
+	dec a
+	ld (_active_pos_x), a
+	
+	push ix
+		ld hl, (_active_pos_x)		;arg2
+		push hl
+			ld hl, _active_piece	;arg1
+			push hl
+				ld hl, _wall		;arg0
+				push hl
+					push hl			;return space
+						call detect_collision
+					pop hl			;return value
+				pop af				;get rid of stack space for agrs
+			pop af
+		pop af
+	pop ix	
+	
+	;if there wasn't a collision, don't restore the previous state
+	ld a, l
+	cp 0
+	jr z, _check_right_key
+	
+	;restore previous state
+	ld de, _active_pos_x
+	ld hl, _backup_piece
+	ld bc, $0005
+	ldir
+	
+	;check for right
+_check_right_key:
+	;save active piece state
+	ld hl, _active_pos_x
+	ld de, _backup_piece
+	ld bc, $0005
+	ldir
+	
+	;move piece and check for collision
+	ld a, (_proc_keys)
+	ld b, a
+	bit right_button_flag, b
+	jr z, _check_down_key
+	ld a, (_active_pos_x)
+	inc a
+	ld (_active_pos_x), a
+	
+	push ix
+		ld hl, (_active_pos_x)		;arg2
+		push hl
+			ld hl, _active_piece	;arg1
+			push hl
+				ld hl, _wall		;arg0
+				push hl
+					push hl			;return space
+						call detect_collision
+					pop hl			;return value
+				pop af				;get rid of stack space for agrs
+			pop af
+		pop af
+	pop ix	
+	
+	;if there wasn't a collision, don't restore the previous state
+	ld a, l
+	cp 0
+	jr z, _check_down_key
+	
+	;restore previous state
+	ld de, _active_pos_x
+	ld hl, _backup_piece
+	ld bc, $0005
+	ldir
+
+_check_down_key:
+	;save active piece state
+	ld hl, _active_pos_x
+	ld de, _backup_piece
+	ld bc, $0005
+	ldir
+	
+	;move piece and check for collision
+	ld a, (_proc_keys)
+	ld b, a
+	bit down_button_flag, b
+	jp z, _finish_internal_logic
+	ld a, (_active_pos_y)
+	inc a
+	ld (_active_pos_y), a
+	
+	push ix
+		ld hl, (_active_pos_x)		;arg2
+		push hl
+			ld hl, _active_piece	;arg1
+			push hl
+				ld hl, _wall		;arg0
+				push hl
+					push hl			;return space
+						call detect_collision
+					pop hl			;return value
+				pop af				;get rid of stack space for agrs
+			pop af
+		pop af
+	pop ix	
+	
+	;if there wasn't a collision, don't restore the previous state
+	ld a, l
+	cp 0
+	jp z, _finish_internal_logic
+	
+	;restore previous state
+	;because this was a collision when moving down, we need to stick the piece
+	;to the wall, clear rows that need to be cleared, and generate a new 
+	;piece
+	ld de, _active_pos_x
+	ld hl, _backup_piece
+	ld bc, $0005
+	ldir
+	
+	;copy piece over to wall
+	;point hl to destination address on wall
+	ld a, (_active_pos_y)
+	ld l, a
+	ld h, 0
+	add hl, hl
+	ld de, _wall
+	add hl, de
+	push hl				;save for (much) later
+	
+		;shift and transfer over each byte at _active_piece
+		ld b, 4
+	_transfer_to_wall:
+		push hl
+			ld hl, (_active_piece)
+			ld e, (hl)
+			ld d, 0
+			inc hl
+			ld (_active_piece), hl
+		pop hl
+		ld a, (_active_pos_x)
+		;and $07
+		cp 0
+		jr z, _wt_shift_done
+		
+	_wall_transfer_shift:
+		srl e
+		rr d
+		dec a
+		jr nz, _wall_transfer_shift
+
+	_wt_shift_done:
+		ld a, (hl)
+		or e
+		ld (hl), a
+		inc hl
+		ld a, (hl)
+		or d
+		ld (hl), a
+		inc hl
+		djnz _transfer_to_wall
+		
+_lock_out:
+		;check to see if the locked piece is in the top two rows.  This means
+		;that the player has lost
+		ld hl, _wall
+		ld a, (hl)
+		and $1f
+		jr nz, _lock_out_loser			;loses
+		inc hl
+		ld a, (hl)
+		and $f8
+		jr nz, _lock_out_loser		;loses
+		inc hl
+		ld a, (hl)
+		and $1f
+		jr nz, _lock_out_loser		;loses
+		inc hl
+		ld a, (hl)
+		and $f8
+		jr nz, _lock_out_loser			;loses
+		jr _clear_full_rows
+		
+_lock_out_loser:
+	pop hl
+	jp _endgame
+	
+	;here we want to detect all of the rows that are full and clear them out,
+	;then reward points accordingly.
+	;hl points to the top row where the piece was placed.
+	;b counts the iterations to do (4 total for all 4 rows of the piece)
+	;c holds number of rows cleared for score calcing.
+	;a is a temp variable
+	;de is used for lddr-ing.
+_clear_full_rows:
+	pop hl			;restore pointer to first row of interest
+	ld b, 4
+	ld c, 0			;c counts the number of rows cleared.
+_row_clear_loop:	;loop to check for a clear row and shift down if necessary.
+	ld a, (hl)
+	inc hl
+	cp $ff
+	jr z, _row_clear_test_bit_2
+	inc hl			;need to inc hl because later instructions won't
+	jp _row_clear_loop_end
+_row_clear_test_bit_2:
+	ld a, (hl)
+	inc hl
+	cp $ff
+	jr nz, _row_clear_loop_end
+_shift_down_over_row:	;shift all bytes above hl down
+	push bc
+		push hl
+			dec hl													
+			ld e, l
+			ld d, h
+			dec hl
+			dec hl
+			push hl
+				push de
+					;calculate amount to decrement
+					ld de, _wall
+					scf
+					ccf
+					sbc hl, de
+					ld b, 0
+					ld c, l
+				pop de
+			pop hl
+			lddr
+		pop hl
+	pop bc
+	
+	;increment # rows cleared.
+	inc c
+_row_clear_loop_end:
+	;check to see if hl has hit the bottom of the wall
+	ld a, h
+	cp _wall_bottom >> 8
+	jr nz, _row_clear_loop_again
+	ld a, l
+	cp _wall_bottom & $ff
+	jr z, _tabulate_line_count
+_row_clear_loop_again:
+	djnz _row_clear_loop
+
+_tabulate_line_count:
+	;use the count of the rows cleared to increment the BCD line count
+	push bc
+		ld a, c
+		add a, a
+		add a, a
+		add a, c
+		ld b, 0
+		ld c, a
+		ld hl, _line_table
+		add hl, bc
+		ld ix, _lines_cleared_count
+		ld de, _lines_cleared_count
+		ld b, 5
+		call add_bcd
+	pop bc
+	
+_tabulate_row_points:
+	;use the count of the rows cleared to increment the score accordingly
+	;point hl to the score to add.
+	ld hl, _scoring_table
+	ld a, c		;multiply c by the size of a single score (8 bytes)
+	add a, a
+	add a, a
+	add a, a
+	ld c, a
+	ld b, 0
+	add hl, bc
+	
+	;set up for bcd add
+	ld ix, _score
+	ld de, _score
+	ld b, 8
+	call add_bcd
+	
+	;now that the score and line count have been adjusted accordingly, adjust
+	;the player's level accordingly.
+	call _test_level
+	
+_piece_gen:
+	;get next piece from "random bag" in de
+	ld a, (_rand_bag_count)
+	ld b, a
+	inc a
+	ld (_rand_bag_count), a
+	ld l, b
+	ld h, 0
+	ld de, _rand_bag_list
+	add hl, de
+	ld a, (hl)
+	ld e, a
+	ld d, 0
+	
+	;multiply de * 20 -> hl
+	ld h, d
+	ld l, e
+	add hl, hl
+	add hl, hl
+	add hl, de
+	add hl, hl
+	add hl, hl
+	ld de, _pieces
+	add hl, de			;add piece index.
+	ld (_active_piece), hl
+	ld a, 0
+	ld (_active_piece_ix), a
+	
+	;start coordinates
+	ld a, $00
+	ld (_active_pos_y), a
+	ld a, 5
+	ld (_active_pos_x), a
+	
+	;if _bag_list_count < 7, don't generate new pieces.
+	ld a, (_rand_bag_count)
+	cp 7
+	jr c, _block_out_test
+	
+	;generate 7 new pieces.
+	ld a, 0
+	ld (_rand_bag_count), a
+	ld hl, _rand_bag_list
+	call generate_7_random
+	
+_block_out_test:
+	;if we have just generated a new piece and it is colliding with existing
+	;pieces, then we have a block out condition and the player loses.
+	;push af				;save registers
+		;push bc
+			push ix
+				ld hl, (_active_pos_x)		;arg2
+				push hl
+					ld hl, _active_piece	;arg1
+					push hl
+						ld hl, _wall		;arg0
+						push hl
+							push hl			;return space
+								call detect_collision
+							pop hl			;return value
+						pop af				;get rid of stack space for agrs
+					pop af
+				pop af
+			pop ix							;restore clobbers
+		;pop bc
+	;pop af
+	
+	;return value in hl
+	ld a, l
+	cp 0
+	jp nz, _endgame
+	
+_finish_internal_logic:
+	
+
+_draw:
+	;check to see if we are paused.  if so, don't draw too much.
+	ld a, (_pause_flag)
+	cp 0
+	jp nz, _draw_pause
+	
+	;put return value from detect_collision into someplace
+	;ld de, PlotSScreen + 9
+	;ld a, l
+	;ld (de), a
+	;inc de
+	;ld a, h
+	;ld (de), a
+	
+	;ld a, (_dbcount)
+	;inc de
+	;ld (de), a
+	;inc a
+	;ld (_dbcount), a
+
+	;draw wall data onto plotSScreen
+	ld de, _wall
+	ld ix, PlotSScreen + 4
+	ld b, 21
+	
+	;for each row of the wall
+	;	if bit 0 is on
+	;		load ix in a certain way
+	;	if bit 1 is on
+	;		load ix in a certain way
+	;	if bit 2 is on
+	;.......
+	;   if bit 9 is on
+	;		load ix in a certain way
+	;	increment ix by 48
+_wall_draw_loop:
+	;load wall into ix
+	ld a, (de)
+	ld h, a
+	inc de
+	ld a, (de)
+	ld l, a
+	inc de
+	
+	;chain of ifs
+_wall_draw_if_0:
+	bit 4, h
+	jr z, _wall_draw_if_1
+	ld a, (ix)
+	or %11100000
+	ld (ix), a
+	ld a, (ix + 12)
+	or %10100000
+	ld (ix + 12), a
+	ld a, (ix + 24)
+	or %11100000
+	ld (ix + 24), a
+	
+_wall_draw_if_1:
+	bit 3, h
+	jr z, _wall_draw_if_2
+	ld a, (ix)
+	or %00011100
+	ld (ix), a
+	ld a, (ix + 12)
+	or %00010100
+	ld (ix + 12), a
+	ld a, (ix + 24)
+	or %00011100
+	ld (ix + 24), a
+	
+_wall_draw_if_2:
+	bit 2, h
+	jr z, _wall_draw_if_3
+	ld a, (ix)
+	or %00000011
+	ld (ix), a
+	ld a, (ix + 12)
+	or %00000010
+	ld (ix + 12), a
+	ld a, (ix + 24)
+	or %00000011
+	ld (ix + 24), a
+	
+	ld a, (ix + 1)
+	or %10000000
+	ld (ix + 1), a
+	ld a, (ix + 13)
+	or %10000000
+	ld (ix + 13), a
+	ld a, (ix + 25)
+	or %10000000
+	ld (ix + 25), a
+	
+_wall_draw_if_3:
+	bit 1, h
+	jr z, _wall_draw_if_4
+	ld a, (ix + 1)
+	or %01110000
+	ld (ix + 1), a
+	ld a, (ix + 13)
+	or %01010000
+	ld (ix + 13), a
+	ld a, (ix + 25)
+	or %01110000
+	ld (ix + 25), a
+	
+_wall_draw_if_4:
+	bit 0, h
+	jr z, _wall_draw_if_5
+	ld a, (ix + 1)
+	or %00001110
+	ld (ix + 1), a
+	ld a, (ix + 13)
+	or %00001010
+	ld (ix + 13), a
+	ld a, (ix + 25)
+	or %00001110
+	ld (ix + 25), a
+	
+_wall_draw_if_5:
+	bit 7, l
+	jr z, _wall_draw_if_6
+	ld a, (ix + 1)
+	or %00000001
+	ld (ix + 1), a
+	ld a, (ix + 13)
+	or %00000001
+	ld (ix + 13), a
+	ld a, (ix + 25)
+	or %00000001
+	ld (ix + 25), a
+	
+	ld a, (ix + 2)
+	or %11000000
+	ld (ix + 2), a
+	ld a, (ix + 14)
+	or %01000000
+	ld (ix + 14), a
+	ld a, (ix + 26)
+	or %11000000
+	ld (ix + 26), a
+	
+_wall_draw_if_6:
+	bit 6, l
+	jr z, _wall_draw_if_7
+	ld a, (ix + 2)
+	or %00111000
+	ld (ix + 2), a
+	ld a, (ix + 14)
+	or %00101000
+	ld (ix + 14), a
+	ld a, (ix + 26)
+	or %00111000
+	ld (ix + 26), a
+	
+_wall_draw_if_7:
+	bit 5, l
+	jr z, _wall_draw_if_8
+	ld a, (ix + 2)
+	or %00000111
+	ld (ix + 2), a
+	ld a, (ix + 14)
+	or %00000101
+	ld (ix + 14), a
+	ld a, (ix + 26)
+	or %00000111
+	ld (ix + 26), a
+	
+_wall_draw_if_8:
+	bit 4, l
+	jr z, _wall_draw_if_9
+	ld a, (ix + 3)
+	or %11100000
+	ld (ix + 3), a
+	ld a, (ix + 15)
+	or %10100000
+	ld (ix + 15), a
+	ld a, (ix + 27)
+	or %11100000
+	ld (ix + 27), a
+	
+_wall_draw_if_9:
+	bit 3, l
+	jr z, _wall_draw_if_end
+	ld a, (ix + 3)
+	or %00011100
+	ld (ix + 3), a
+	ld a, (ix + 15)
+	or %00010100
+	ld (ix + 15), a
+	ld a, (ix + 27)
+	or %00011100
+	ld (ix + 27), a
+
+_wall_draw_if_end:
+	push de
+		ld de, 36
+		add ix, de
+	pop de
+	dec b
+	jp nz, _wall_draw_loop
+
+;_wall_move:
+;	;move wall data onto plotSScreen
+;	ld de, _wall
+;	ld hl, PlotSScreen
+;	ld b, 21
+;_wall_move_loop:
+;	ld a, (de)
+;	ld (hl), a
+;	inc de
+;	inc hl
+;	ld a, (de)
+;	ld (hl), a
+;	inc de
+;	dec hl
+;	push bc
+;		ld bc, 12
+;		add hl, bc
+;	pop bc
+;	djnz _wall_move_loop
+;	
+;	;draw sprite
+;	ld hl, (_active_piece)
+;	ld b, 1
+;	ld c, 4
+;	ld a, (_active_pos_x)
+;	ld d, a
+;	ld a, (_active_pos_y)
+;	ld e, a
+;	call put_sprite
+	
+	;draw (large) sprite
+	;for each byte of 
+	ld hl, (_active_piece)		;hl holds pointer to active piece
+	
+	ld a, (_active_pos_x)		;graphical x-pos = x-pos * 3 + 32
+	add a, -3					;subtract 3, the bit-with of the well's left margin
+	ld b, a
+	add a, a
+	add a, b	
+	add a, 32
+	ld d, a						; d holds x pos
+	
+	ld a, (_active_pos_y)		;graphical y-pos = y-pos*3
+	ld b, a
+	add a, a
+	add a, b
+	ld e, a						;e holds y-pos
+	
+	ld b, 4
+	
+_big_sprite_byte_loop:
+	;get next row into a
+	ld a, (hl)
+_big_sprite_bit_loop:
+	bit 7, a
+	jr z, _big_sprite_bit_loop_done
+	;bit 7 of a was nonzero, so we need to put a sprite at the appropriate
+	;location
+	push hl
+		push bc
+			push de
+				push af
+					ld hl, _big_block_sprite
+					ld b, 1
+					ld c, 3
+					call put_sprite
+				pop af
+			pop de
+		pop bc
+	pop hl
+
+_big_sprite_bit_loop_done:
+	;prepare for next loop
+	sla a		;shift over next bit
+	inc d		;x-pos += 3.  inc 3 times is cheapest
+	inc d
+	inc d
+	cp 0		;if a is 0, we can be done with this byte.
+	jr nz, _big_sprite_bit_loop
+	
+	;reset x coordinate and increment y-coordinate
+	ld a, (_active_pos_x)		;graphical x-pos = x-pos * 3 + 32
+	add a, -3
+	ld c, a
+	add a, a
+	add a, c	
+	add a, 32
+	ld d, a						; d holds x pos
+	
+	inc e
+	inc e
+	inc e
+	
+	inc hl
+	djnz _big_sprite_byte_loop
+	
+	;jump over drawing pause
+	jp _draw_score
+	;TODO: draw the word "pause"
+_draw_pause:
+	ld d, $20
+	ld e, $25
+	ld hl, _pause_string
+	call put_numerical_string
+
+;draw the next piece
+_next_piece_draw_loop:
+
+	
+_draw_score:
+	;draw score
+	;Translate bcd number at _score to a string.  Pretty easy, really.
+	ld b, 8
+	ld de, _score
+	ld hl, _scorestr + 7
+_score_flip_and_ascii_loop:
+	ld a, (de)
+	add a, $30
+	ld (hl), a
+	dec hl
+	inc de
+	djnz _score_flip_and_ascii_loop
+	
+	;actually draw score.  sooo easy with bcd.
+	ld d, $40
+	ld e, $10
+	ld hl, _scorestr
+	call put_numerical_string
+	
+	;draw number of lines cleared
+	ld b, 5
+	ld de, _lines_cleared_count
+	ld hl, _lines_cleared_count_string + 4
+_lines_flip_and_ascii_loop:
+	ld a, (de)
+	add a, $30
+	ld (hl), a
+	dec hl
+	inc de
+	djnz _lines_flip_and_ascii_loop
+	
+	;actually draw line count.  sooo easy with bcd.
+	ld d, $40
+	ld e, $17
+	ld hl, _lines_cleared_count_string
+	call put_numerical_string
+	
+	;draw level
+	ld b, 2
+	ld de, _level_bcd
+	ld hl, _level_bcd_string + 1
+_level_flip_and_ascii_loop:
+	ld a, (de)
+	add a, $30
+	ld (hl), a
+	dec hl
+	inc de
+	djnz _level_flip_and_ascii_loop
+	
+	;actually draw level.  sooo easy with bcd.
+	ld d, $40
+	ld e, $1d
+	ld hl, _level_bcd_string
+	call put_numerical_string
+	
+	;draw borders
+	ld b, Y_MAX + 1
+	ld c, $01
+	ld de, 12
+	ld hl, PlotSScreen + 3
+_left_border_loop:
+	ld a, (hl)
+	or c
+	ld (hl), a
+	add hl, de
+	djnz _left_border_loop
+	
+	ld b, Y_MAX			;last row is covered by bottom border.
+	ld c, $02
+	ld hl, PlotSScreen + 7
+_right_border_loop:
+	ld a, (hl)
+	or c
+	ld (hl), a
+	add hl, de
+	djnz _right_border_loop
+	
+	;bottom border
+	ld a, $ff
+	ld (PlotSScreen + (12 * 63) + 4), a
+	ld a, $ff
+	ld (PlotSScreen + (12 * 63) + 5), a
+	ld a, $ff
+	ld (PlotSScreen + (12 * 63) + 6), a
+	ld a, $fE
+	ld (PlotSScreen + (12 * 63) + 7), a
+	
+	;;DEBUG PRINTS!!!!
+	;display initial rng seed value.
+	;ld a, (_db_rng_seed)
+	;ld (PlotSScreen + 12*25), a
+	;ld a, (_db_rng_seed + 1)
+	;ld (PlotSScreen + 12*25 + 1), a
+	;ld a, (_db_rng_seed + 2)
+	;ld (PlotSScreen + 12*25 + 2), a
+	;ld a, (_db_rng_seed + 3)
+	;ld (PlotSScreen + 12*25 + 3), a
+	
+	;display FPS
+	ld a, (_frame_count_prev)
+	ld (PlotSScreen), a
+	
+	;display random bag on the screen
+	ld a, (_rand_bag_count)
+	ld l, a
+	ld h, 0
+	ld de, _rand_bag_list
+	add hl, de
+	ex de, hl
+	ld b, a
+	ld a, 7
+	sub b
+	;a now contains the number of loops to do
+	ld b, a
+	ld hl, PlotSScreen + 2*12
+_rand_bag_draw_loop:
+	ld a, (de)
+	ld (hl), a
+	push bc
+		ld b, 0
+		ld c, 12
+		add hl, bc
+	pop bc
+	inc de
+	djnz _rand_bag_draw_loop
+	
+	call fast_putscreen
+	
+	jp _input_logic
+
+;code to wrap everything up (clear LCD, return hardware to original state,
+;etc).  This will probably be located elsewhere in later editions of the game.
+_endgame:
+	;clear the lcd screen.  ~$a430
+	call clear_graph_buffer
+	call fast_putscreen
+	
+	;return to interrupt mode 1
+	di
+	im 1
+	ei
+	ret
+
+;levelling routine.  Has global vars.
+_test_level:
+	;first check to see if we've reached the max level or not.  If we have,
+	;then just ret
+	ld a, (_level_bin)
+	cp MAX_LEVEL	;length of score table plus 1
+	ret nc
+	
+	;we haven't maxed out the level, so increment the level if we've reached
+	;the threshold for the next level.
+	;in order to do this, we first need to point hl to the msb of the
+	;requirement to reach the next level.
+	ld b, a
+	add a, a		;a = level * 5
+	add a, a
+	add a, b
+	ld l, a
+	ld h, 0
+	ld de, _levelling_table
+	add hl, de
+	ld e, 4			;length of levelling table elements minus one.
+	ld d, 0
+	add hl, de
+	
+	;we want to compare the number pointed by hl to the number of lines
+	;cleared, so we need to point de to the msb of the number of lines cleared.
+	ld d, h
+	ld e, l
+	ld hl, _lines_cleared_count + 4
+	
+	;compare bcd pointed by hl to bcd pointed by de.
+	ld b, 5
+	call bcd_compare
+	
+	;if the result of the compare was not -1, level up.
+	cp $ff
+	ret z
+	
+	;level up
+	;increment level binary
+	ld a, (_level_bin)
+	inc a
+	ld (_level_bin), a
+	
+	;increment level bcd
+	ld hl, _bcd_one
+	ld ix, _level_bcd
+	ld de, _level_bcd
+	ld b, 2
+	call add_bcd
+	
+	;TODO: increment level points earned for line clear
+	;increase points awarded for line clear
+	ld de, _scoring_table + 8
+	ld hl, _score_levelling_table + 8
+	ld ix, _scoring_table + 8
+	ld b, 4
+_increment_score_table_loop:
+	push bc
+		ld b, 8
+		push hl
+			push ix
+				push de
+					call add_bcd
+				pop de
+			pop ix
+		pop hl
+		ld b, 0
+		ld c, 8
+		add hl, bc
+		add ix, bc
+		push hl
+			push de
+			pop hl
+			add hl, bc
+			push hl
+			pop de
+		pop hl
+	pop bc
+	djnz _increment_score_table_loop
+	
+	ret
+	
+;isr for counting shit.  Counts _dbcount
+_isr:
+	ex af, af'
+	exx
+	xor a		;disable hardware
+	out (3), a
+	
+	ld hl, (_dbcount)
+	inc hl
+	ld (_dbcount), hl
+	
+	ld a, $0b	;reenable hardware
+	out (3), a
+	ex af, af'
+	exx
+	ei
+	ret
+_isr_end:
+	
+;variable to store key presses
+;flags of which directions to process
+_proc_keys:
+	.db 0
+
+;variable to store previous keys to check for rising/falling edges
+_keys_prev:
+	.db 0
+
+;directions to hold timing for key repeats
+_left_time:
+	.db 0
+_right_time:
+	.db 0
+_down_time:
+	.db 0
+_grav_time:
+	.db 0
+	
+;tells if a key should be considered with the counter or not.
+_stickies:
+	.db 0
+
+;pause button
+_pause_prev:
+	.db 0
+_pause_flag:
+	.db 0
+_dbcount_backup:
+	.db 0
+	
+;variables to store piece states
+_active_pos_x:
+	.db 0
+
+_active_pos_y:
+	.db 0
+
+_active_piece:
+	.dw 0
+
+_active_piece_ix:
+	.db 0
+
+_backup_piece:
+	.db 0, 0, 0, 0, 0
+
+;variables to keep track of piece generation information
+;list of 7 pieces
+_rand_bag_list:
+	.db 0, 0, 0, 0, 0, 0, 0
+
+;pointer to list of 7 pieces
+_rand_bag_count:
+	.db 0
+
+;holds the score in bcd format
+_level_bcd:
+	.db 1, 0
+_level_bcd_string:
+	.db 0, 0, 0
+	
+_level_bin:
+	.db 0
+
+_levelling_table:
+	.db 0, 1, 0, 0, 0
+	.db 0, 2, 0, 0, 0
+	.db 0, 3, 0, 0, 0
+	.db 0, 4, 0, 0, 0
+	.db 0, 5, 0, 0, 0
+	.db 0, 6, 0, 0, 0
+	.db 0, 7, 0, 0, 0
+	.db 5, 8, 0, 0, 0
+	.db 0, 0, 1, 0, 0
+	.db 0, 2, 1, 0, 0
+
+_level_delays:
+	.db 70, 63, 56, 49, 42, 35, 30, 26, 22, 19, 16, 14
+	
+_lines_cleared_count:
+	.db 0, 0, 0, 0, 0
+_lines_cleared_count_string:
+	.db 0, 0, 0, 0, 0
+
+_line_table:
+	.db 0, 0, 0, 0, 0
+	.db 1, 0, 0, 0, 0
+	.db 2, 0, 0, 0, 0
+	.db 3, 0, 0, 0, 0
+	.db 4, 0, 0, 0, 0
+	
+_score:
+	.dw 0, 0, 0, 0
+
+_scorestr:
+	.dw 0, 0, 0, 0, 0
+
+;information on how to increase score as level increases.  bcd format.
+_score_levelling_table:
+	.db 0, 0, 0, 0, 0, 0, 0, 0			;00000
+	.db 0, 0, 1, 0, 0, 0, 0, 0			;00100
+	.db 0, 0, 3, 0, 0, 0, 0, 0			;00300
+	.db 0, 0, 5, 0, 0, 0, 0, 0			;00500
+	.db 0, 0, 8, 0, 0, 0, 0, 0			;00800
+	
+;table for holding score information
+_scoring_table:
+	.db 0, 0, 0, 0, 0, 0, 0, 0			;00000
+	.db 0, 0, 1, 0, 0, 0, 0, 0			;00100
+	.db 0, 0, 3, 0, 0, 0, 0, 0			;00300
+	.db 0, 0, 5, 0, 0, 0, 0, 0			;00500
+	.db 0, 0, 8, 0, 0, 0, 0, 0			;00800
+
+_bcd_one:
+	.db 1, 0, 0, 0, 0, 0, 0, 0
+;other static vars
+_dbcount:
+	.dw 0, 0
+
+_db_rng_seed:
+	.dw 0, 0
+
+_frame_count:
+	.db 0
+
+_frame_count_prev:
+	.db 0
+	
+_dbcount_prev:
+	.db 0
+
+	.db	$e0, $07
+;the playing space consists of 
+_wall:
+	.db	$e0, $07
+	.db	$e0, $07		;1
+	.db	$e0, $07
+	.db	$e0, $07
+	.db	$e0, $07
+	.db	$e0, $07		;5
+	.db	$e0, $07
+	.db	$e0, $07
+	.db	$e0, $07
+	.db	$e0, $07
+	.db	%11100000, %00000111		;10
+	.db	%11100000, %00000111
+	.db	%11100000, %00000111
+	.db	%11100000, %00000111
+	.db	%11100000, %00000111
+	.db	%11100000, %00000111	  	;15
+	.db	%11100000, %00000111
+	.db	%11100000, %00000111
+	.db	%11100000, %00000111
+	.db	%11100000, %00000111
+	.db	%11100000, %00000111	   	;20
+_wall_bottom:
+	.db	$ff, $ff		;beneath bottom of screen
+
+;bitmasks for pieces
+_pieces:
+	;square
+	.db %01100000
+	.db %01100000
+	.db %00000000
+	.db %00000000
+
+	.db %01100000
+	.db %01100000
+	.db %00000000
+	.db %00000000
+	
+	.db %01100000
+	.db %01100000
+	.db %00000000
+	.db %00000000
+	
+	.db %01100000
+	.db %01100000
+	.db %00000000
+	.db %00000000
+	
+	.db $ff, $00, $00, $00
+	
+	;T
+	.db %01000000
+	.db %11100000
+	.db %00000000
+	.db %00000000
+	
+	.db %01000000
+	.db %01100000
+	.db %01000000
+	.db $00
+	
+	.db %00000000
+	.db %11100000
+	.db %01000000
+	.db $00
+	
+	.db %01000000
+	.db %11000000
+	.db %01000000
+	.db %00000000
+	
+	.db $ff, $00, $00, $00
+	
+	;L
+	.db %00100000
+	.db %11100000
+	.db %00000000
+	.db %00000000
+	
+	.db %01000000
+	.db %01000000
+	.db %01100000
+	.db $00
+	
+	.db %00000000
+	.db %11100000
+	.db %10000000
+	.db $00
+	
+	.db %11000000
+	.db %01000000
+	.db %01000000
+	.db %00000000
+	
+	.db $ff, $00, $00, $00
+	
+	;backwards L
+	.db %10000000
+	.db %11100000
+	.db %00000000
+	.db %00000000
+	
+	.db %01100000
+	.db %01000000
+	.db %01000000
+	.db $00
+	
+	.db %00000000
+	.db %11100000
+	.db %00100000
+	.db $00
+	
+	.db %01000000
+	.db %01000000
+	.db %11000000
+	.db %00000000
+	
+	.db $ff, $00, $00, $00
+
+	;Line
+	.db %00000000
+	.db %11110000
+	.db %00000000
+	.db %00000000
+	
+	.db %00100000
+	.db %00100000
+	.db %00100000
+	.db %00100000
+	
+	.db %00000000
+	.db %00000000
+	.db %11110000
+	.db $00
+	
+	.db %01000000
+	.db %01000000
+	.db %01000000
+	.db %01000000
+	
+	.db $ff, $00, $00, $00
+	
+	;S
+	.db %01100000
+	.db %11000000
+	.db %00000000
+	.db %00000000
+	
+	.db %01000000
+	.db %01100000
+	.db %00100000
+	.db %00000000
+	
+	.db %00000000
+	.db %01100000
+	.db %11000000
+	.db $00
+	
+	.db %10000000
+	.db %11000000
+	.db %01000000
+	.db %00000000
+	
+	.db $ff, $00, $00, $00
+	
+	;Z
+	.db %11000000
+	.db %01100000
+	.db %00000000
+	.db %00000000
+	
+	.db %00100000
+	.db %01100000
+	.db %01000000
+	.db %00000000
+	
+	.db %00000000
+	.db %11000000
+	.db %01100000
+	.db $00
+	
+	.db %01000000
+	.db %11000000
+	.db %10000000
+	.db %00000000
+	
+	.db $ff, $00, $00, $00
+	
+_big_block_sprite:
+	.db %11100000
+	.db %10100000
+	.db %11100000
+
+_pause_string:
+	.db "paused\0"
+
+.module detect_collision
+	;TODO: test for x = 0 and x > 15.
+	;args
+	;	x_pos (lsb) y_pos (msb)  arg 2
+	;	pointer to piece		 arg 1
+	;	pointer to wall			 arg 0
+	;returns
+	;	nonzero if collision
+detect_collision:
+	ld ix, 0
+	add ix, sp
+	push de
+		push hl
+			;load address of piece into (ix + 6)
+			ld e, (ix + 6)
+			ld d, (ix + 7)
+			
+			;load address of piece into de and then into hl
+			ld a, (de)
+			ld (ix + 6), a
+			inc de
+			ld a, (de)
+			ld (ix + 7), a
+			
+			;load hl with wall addresses we are interested in.  This is given by
+			;_wall + (2 * active_pos_y)
+			ld l, (ix + 9)
+			ld h, 0
+			add hl, hl
+			
+			;offset up to arg0 addr
+			ld e, (ix + 4)
+			ld d, (ix + 5)
+			add hl, de
+			
+			;now we have the address of wall bits to test against, so load active piece
+			;into de line by line, shifting and testing each time.
+			ld b, 4
+_collide_bits_loop:
+			;load row of piece into de
+			push hl
+				;load address of address of piece into hl
+				ld l, (ix + 6)
+				ld h, (ix + 7)
+				
+				;load piece into de
+				ld e, (hl)
+				inc hl
+				ld d, 0
+				
+				;update row pointer
+				ld (ix + 6), l
+				ld (ix + 7), h
+			pop hl
+			
+			;now de contains the (unshifted) byte of the piece to check against, and hl
+			;points to the relevant portion of the wall.
+			;need to shift de
+			push bc			;save b so b can be loaded with amount to shift
+				ld a, (ix + 8)
+				cp 0
+				jr z, _shift_done
+				ld b, a
+_tetromino_row_shift_loop:
+				srl e
+				rr d
+				djnz _tetromino_row_shift_loop
+_shift_done:
+			pop bc
+			
+			;now de contains the row that we want to & with the value pointed by hl
+			ld a, (hl)
+			and e
+			jr nz, _return1
+			
+			inc hl
+			ld a, (hl)
+			and d
+			jr nz, _return1
+			
+			inc hl		;move hl down to the next row
+			djnz _collide_bits_loop		;jump back to the top of the collision test loop.
+			
+			;if we've reached this point, there is no collision, so return 0
+			ld (ix + 2), 0
+			ld (ix + 3), 0
+			jr _epilouge
+			
+_return1:
+			ld (ix + 2), $ff
+			ld (ix + 3), $ff
+			
+_epilouge:
+		pop hl
+	pop de
+	ret
+.endmodule
+
+.module byte_bcd_functions
+;adds two arbitrary-length binary coded decimal numbers stored in memory together.
+;ix - holds the pointer to operand 1 lsb.
+;hl - holds the pointer to operand 2 lsb.
+;de - holds the pointer to the result area lsb.
+;b - holds the length of the operands.
+;clobbers all
+add_bcd:
+	scf			;lol clear carry flag.
+	ccf
+_bcd_loop:
+	;do the actual addition
+	ld a, (ix)
+	adc a, (hl)
+	inc ix
+	inc hl
+	cp $0a
+	jr c, _no_carry
+	
+	;do the carry
+	sub $0a
+	ld (de), a		;load result into result space
+	inc de
+	scf				;carry
+	jr _inc_and_loop
+	
+_no_carry:
+	ld (de), a
+	inc de
+	scf
+	ccf
+
+_inc_and_loop:
+	djnz _bcd_loop
+	ret
+
+;compares two arbitrary-length binary coded decimal numbers.
+;hl points to msb of A
+;de points to msb of B
+;a equals 1 if A > B, a equals -1 if A < B, a equals 0 if A == B.
+;b holds the lengths of the numbers to compare.
+bcd_compare:
+
+_loop:
+	ld a, (hl)
+	ld c, a
+	ld a, (de)
+	sub c
+	jr c, _A_greater_B
+	cp 0
+	jr nz, _A_less_B
+	dec hl
+	dec de
+	djnz _loop
+	ld a, 0
+	ret
+
+_A_greater_B:
+	ld a, 1
+	ret
+
+_A_less_B:
+	ld a, $ff
+	ret
+	
+.endmodule
+
+.module put_numerical_string
+;routine that prints a numerical string on the screen
+;hl points to the null-terminated string to display.
+;d is the x coord
+;e is the y coord.
+put_numerical_string:
+
+_putloop:
+	ld a, (hl)
+	cp 0
+	ret z
+	
+	;put sprite
+	push hl
+		push de
+			;hl = sprite_table + val(a) * 5
+			add a, -3*16
+			ld b, 0
+			ld c, a
+			ld h, b
+			ld l, c
+			add hl, hl
+			add hl, hl
+			add hl, bc
+			ld bc, _sprite_table
+			;ld bc, texties
+			add hl, bc
+			ld b, 1
+			ld c, 5
+			call put_sprite
+		pop de
+	pop hl
+	
+	ld a, d
+	add a, 4
+	ld d, a
+	inc hl
+	jr _putloop
+
+_sprite_table:
+.db %01000000		;0
+.db %10100000
+.db %10100000
+.db %10100000
+.db %01000000
+
+.db %01000000		;1
+.db %11000000
+.db %01000000
+.db %01000000
+.db %11100000
+
+.db %11000000		;2
+.db %00100000
+.db %01000000
+.db %10000000
+.db %11100000
+
+.db %11000000
+.db %00100000
+.db %01000000
+.db %00100000
+.db %11000000
+
+.db %10000000
+.db %10100000
+.db %11100000
+.db %00100000
+.db %00100000
+
+.db %11100000
+.db %10000000
+.db %11000000
+.db %00100000
+.db %11000000
+
+.db %01100000
+.db %10000000
+.db %11100000
+.db %10100000
+.db %11100000
+
+.db %11100000
+.db %00100000
+.db %01000000
+.db %10000000
+.db %10000000
+
+.db %11100000
+.db %10100000
+.db %11100000
+.db %10100000
+.db %11100000
+
+.db %11100000
+.db %10100000
+.db %11100000
+.db %00100000
+.db %11000000
+.endmodule
+
+.module rng
+;Seeds the random number generator with the 32 bit value in bcde
+seed_rng:
+	ld a, e
+	ld (_num), a
+	ld a, d
+	ld (_num + 1), a
+	ld a, c
+	ld (_num + 2), a
+	ld a, b
+	ld (_num + 3), a
+	ret
+
+;generate random number and return it in bcde <msb> - <lsb>
+;uses an xnor linear feedback shift register with taps at bits 31, 21, 1, and 0
+;NB!!!!!: (where bit 31 is lsb (bit 0 of e))
+rng:
+	;load global var "_num" into bcde.
+	ld a, (_num)
+	ld e, a
+	ld a, (_num + 1)
+	ld d, a
+	ld a, (_num + 2)
+	ld c, a
+	ld a, (_num + 3)
+	ld b, a
+	
+	;use register a to hold the bit to shift into the top.
+	ld h, e
+	;shift
+	ld a, h		;get bit 31 in a's lsb
+	ld h, d
+	srl h
+	srl h		;bit 21 in h's lsb
+	xor h		;xnor
+	xor 1
+	
+	ld h, b
+	srl h
+	srl h
+	srl h
+	srl h
+	srl h
+	srl h		;bit 1 in h's lsb
+	xor h
+	xor 1
+	srl h		;bit 0 in h's lsb
+	xor h
+	xor 1
+	
+	;shift a into 32 bits.
+	srl a
+	rr b
+	rr c
+	rr d
+	rr e
+	
+	;load it into the random number
+	ld a, e
+	ld (_num), a
+	ld a, d
+	ld (_num + 1), a
+	ld a, c
+	ld (_num + 2), a
+	ld a, b
+	ld (_num + 3), a
+	ret
+	
+_num:
+	.dw 0, 0
+
+;generates 7 unique random numbers from 0 to 6 (should generalize this) and
+;puts them in the memory location pointed by hl
+generate_7_random:
+	;fill the list of random numbers
+	ld de, _starting_list
+	ld b, 7
+	ld a, 0
+_fill_starting_list_loop:
+	ld (de), a
+	inc a
+	inc de
+	djnz _fill_starting_list_loop
+	
+	;now, move numbers from that list to the destination randomly
+	ld a, 6
+_shuffle_loop:
+	;generate a random number until its less than or equal to a
+	push af
+		push hl
+			call rng
+		pop hl
+		;result equals result mod 8
+		ld a, e
+		and $07
+		ld e, a
+	pop af
+	cp e
+	jr c, _shuffle_loop			;redo if the generated number (mod 8) is > a.
+	
+	;e contains the random number.  Save in b.
+	ld b, e
+	ld de, _starting_list
+	push af
+	;cool.  We have a valid random number in b.  Now we need to go that far through
+	;the list, skipping over zeroes
+_list_zero_skip:
+		ld a, (de)
+		cp $ff
+		jr nz, _dont_skip_element
+		inc de
+		jr _list_zero_skip
+
+_dont_skip_element:
+		;if the list thing wasn't zero, it counts for something, so decrement b
+		;and increment the list index.
+		dec b
+		bit 7, b
+		jr nz, _list_zero_skip_done
+		inc de
+		jr _list_zero_skip
+
+_list_zero_skip_done:	
+		;de now points to the element of the list that we want to copy to the
+		;result list.
+		ld a, (de)
+		
+		;store the selected number in the results list.
+		ld (hl), a
+		
+		;clear that entry in the selection list
+		ld a, $ff
+		ld (de), a
+		
+		;move on to next array index
+		inc de
+		inc hl
+	pop af
+	dec a
+	bit 7, a
+	jr z, _shuffle_loop		;go back to top if a is non-negative.
+	ret
+	
+_starting_list:
+	.db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+.endmodule
+
+.module put_sprite
+;Puts the given sprite at the given bit coordinates in PlotSScreen.
+;This routine is pretty primitive right now.
+;args
+;	hl - holds pointer to sprite
+;	b  - holds byte-width of sprite
+;	c  - holds bit-height of sprite
+;	d  - holds x coordinate of sprite
+;	e  - holds y coordinate of sprite
+;
+;algorithm
+;	1. point de to starting byte of PlotSScreen
+;	2. sprite_line = 0			to count lines of the sprite
+;	3. sprite_byte = 0			to count width of the sprite
+;	4. load sprite byte into bc
+;	5. Shift appropriately (x coord mod 8)
+;	6. bitmask (de) or c and (de + 1) or b.
+;	7. if sprite_byte < width/8 and room remains onscreen, goto 4
+;	8. move bc down one line
+;	9. move pointer to sprite down
+;	10. if sprite_line < height and room remains onscreen, goto 4
+;	
+;	TODO: clipping
+;	idea: preprocess length, width, and hl for clipping?
+put_sprite:
+	ld ix, 0
+	add ix, sp
+	
+	;move de to proper position
+	push de
+		push hl
+			ld d, 0
+			ld e, (ix - 2)
+			ld h, 0
+			ld l, e
+			add hl, hl
+			add hl, de
+			add hl, hl
+			add hl, hl
+			
+			ld e, (ix - 1)
+			srl e
+			srl e
+			srl e
+			add hl, de
+			
+			ld de, PlotSScreen
+			add hl, de
+			
+			ex de, hl
+		pop hl
+		
+		;Now de points to the byte of PlotSScreen that we want to start writing
+		;to.  We need to loop over all the bytes in each row, loading and shifting
+		;each one.
+_byte_loop:
+		push bc
+			push bc
+				push de
+_put_byte:
+					ld c, (hl)
+					ld b, 0
+					inc hl			;increment sprite pointer
+					ld a, (ix - 1)
+					and $07
+					jr z, _no_shift
+_shift_loop:
+					srl c
+					rr b
+					dec a
+					jr nz, _shift_loop
+
+_no_shift:
+					;Done shifting.  Write to screen
+					ld a, (de)
+					or c
+					ld (de), a
+					inc de
+					
+					ld a, (de)
+					or b
+					ld (de), a
+					
+					;check to see if there are more bytes in the line or not
+					ld a, (ix - 5)
+					dec a
+					cp 0
+					jr z, _done_with_line
+					ld (ix - 5), a
+					jr _put_byte
+				
+_done_with_line:
+				;update stuff for next line.
+				;increment de
+				pop de
+				push hl
+					ld hl, 12
+					add hl, de
+					ex de, hl
+				pop hl
+				
+				;check to see if we should do it again
+			pop bc
+		pop bc
+		dec c
+		jr nz, _byte_loop
+	pop de
+	ret
+.endmodule
+
+.module fast_putscreen
+fast_putscreen:
+	ld hl, PlotSScreen
+	ld c, $20-1		;c holds column number
+	
+_colloop:
+	inc c
+	ld a, c			;check if done with all columns
+	cp $2c
+	ret z			
+	
+	out ($10), a
+	call $000b		;lcd busy quick
+	
+	ld a, $80		;set column
+	out ($10), a	
+	call $000b		
+	ld b, 64
+	ld de, 12
+	
+_pixelloop:			;TODO: see if we can replace call $000b with useful stuff.
+	ld a, (hl)
+	out ($11), a
+	ld a, $00		;clear PlotSScreen space
+	ld (hl), a
+	add hl, de
+	call $000b
+	djnz _pixelloop
+	
+	;move hl back to start and one col over
+	ld de, -(12 * 64) + 1
+	add hl, de
+	jr _colloop
+	
+.endmodule	
+
+.module clear_graph_buffer
+clear_graph_buffer:
+	di
+	ld (_save_sp), sp
+	ld sp, PlotSScreen+768
+	ld hl, $0000
+	ld b, 96
+_loop:
+	push hl
+	push hl
+	push hl
+	push hl
+	djnz _loop
+
+	ld sp, (_save_sp)
+	ei
+	nop
+	ret
+
+_save_sp:
+	.dw 0
+	
+.endmodule
+
+.end
+.end
