@@ -1,0 +1,11 @@
+#emacs gitignore
+*~
+\#*\#
+.\#*
+
+#ignore .8xp files
+*.8xp
+
+#ignore ti83plus.inc
+#we don't want to commit it
+source/ti83plus.inc
