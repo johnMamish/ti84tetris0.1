@@ -2069,18 +2069,29 @@ _fill_starting_list_loop:
 	;now, move numbers from that list to the destination randomly
 	ld a, 6
 _shuffle_loop:
-	;generate a random number until its less than or equal to a
+	;generate a random number and modulo by a
 	push af
 		push hl
 			call rng
 		pop hl
-		;result equals result mod 8
+		
+		;result equals result mod a
 		ld a, e
-		and $07
+		and $1f
 		ld e, a
 	pop af
-	cp e
-	jr c, _shuffle_loop			;redo if the generated number (mod 8) is > a.
+	ld b, a   ;need to calc a % (b+1)
+	inc b
+	ld a, e
+_mod2loop:
+	cp b
+	jr c, _moddone
+	sub b
+	jr _mod2loop
+_moddone:
+	ld e, a
+	dec b
+	ld a, b	
 	
 	;e contains the random number.  Save in b.
 	ld b, e
@@ -2123,6 +2134,7 @@ _list_zero_skip_done:
 	dec a
 	bit 7, a
 	jr z, _shuffle_loop		;go back to top if a is non-negative.
+		
 	ret
 	
 _starting_list:

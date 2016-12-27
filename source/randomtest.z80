@@ -6,10 +6,116 @@
 .org $9d95 - 2
 .db t2ByteTok, tAsmCmp
 
-    ld hl, _start_string
+    ld hl, _start_string0
     bcall(_putS)
+    bcall(_NewLine)
+
+    ld hl, _start_string1
+    bcall(_putS)
+    bcall(_NewLine)    
+    
+    ld hl, _start_string2
+    bcall(_putS)
+    bcall(_NewLine)   
+
+;seed RNG with value 0x11223344
+	ld a, e
+	ld b, $55
+	ld c, $aa
+	ld d, $39
+	ld e, $8f
+	call seed_rng
+	
+
+	;generate first list and save final number
+	ld hl, _random_list
+	call generate_7_random
+	ld a, (_random_list + 6)
+	ld e, a
+	
+	;run 1024 trials
+	ld bc, 1024
+run_trial:
+	;previous list end in e, save it.
+	ld hl, _random_list
+	push de
+		push bc
+		     call generate_7_random
+		pop bc
+	pop de
+	
+	;compare first list item to e
+	ld a, (_random_list)
+	cp e
+	jr nz, _no_match
+	ld d, 0
+	ld hl, _double_count
+	add hl, de
+	ld a, (hl)
+	inc a
+	ld (hl), a
+	
+_no_match:
+	;save list end in e
+	ld a, (_random_list + 6)
+	ld e, a
+	
+	dec bc
+	ld a, b
+	cp 0
+	jr nz, run_trial
+	ld a, c
+	cp 0
+	jr nz, run_trial
+
+	;print results
+	ld hl, _double_count
+	ld b, 7
+_printloop:
+	ld a, (hl)
+	push hl
+	     ld h, 0
+	     ld l, a
+	     bcall(_DispHL)
+	     bcall(_NewLine)
+	pop hl
+	inc hl
+	djnz _printloop
+	bcall(_GetKey)
+;	ret
+
+.if 1
+bloop:
+	;print random number state
+	ld hl, (_num + 2)
+	call disp_hl_hex
+	ld hl, (_num)
+	call disp_hl_hex
+	bcall(_NewLine)
+	
+	;generate new list of random numbers
+	ld hl, _random_list
+	call generate_7_random
+	
+	;print list of random numbers
+	ld hl, _random_list
+	ld b, 7
+_print:
+	ld a, (hl)
+	add a, '0'
+	bcall(_PutC)
+	ld a, ' '
+	bcall(_PutC)
+	inc hl
+	djnz _print
+	
+	bcall(_NewLine)
+	bcall(_GetKey)
+	cp kEnter
+	jr z, bloop
     
     ret
+.endif
 
 seed_rng:
 	ld a, e
@@ -25,6 +131,7 @@ seed_rng:
 ;generate random number and return it in bcde <msb> - <lsb>
 ;uses an xnor linear feedback shift register with taps at bits 31, 21, 1, and 0
 ;NB!!!!!: (where bit 31 is lsb (bit 0 of e))
+;TODO: change to galois shift register for speed considerations.
 rng:
 	;load global var "_num" into bcde.
 	ld a, (_num)
@@ -77,11 +184,233 @@ rng:
 	ld (_num + 3), a
 	ret
 
-_start_string:
-	.db "rng test\n"
-	.db "press enter to advance\n\0"
+;prints hl hexidecimal
+;clobbers: all
+disp_hl_hex:
+	;msn of h
+	ld a, $f0
+	and h
+	srl a
+	srl a
+	srl a
+	srl a
+	cp 10
+	jr nc, _alpha0
+	add a, '0'
+	jr _msnhdone
+
+_alpha0:
+	add a, 'a' - 10
+
+_msnhdone:
+	bcall(_PutC)
+
+	;lsn of h
+	ld a, $0f
+	and h
+	cp 10
+	jr nc, _alpha1
+	add a, '0'
+	jr _lsnhdone
+
+_alpha1:
+	add a, 'a' - 10
+
+_lsnhdone:
+	bcall(_PutC)
+	
+	;msn of l
+	ld a, $f0
+	and l
+	srl a
+	srl a
+	srl a
+	srl a
+	cp 10
+	jr nc, _alpha2
+	add a, '0'
+	jr _msnldone
+
+_alpha2:
+	add a, 'a' - 10
+
+_msnldone:
+	bcall(_PutC)
+
+	;lsn of l
+	ld a, $0f
+	and l
+	cp 10
+	jr nc, _alpha3
+	add a, '0'
+	jr _lsnldone
+
+_alpha3:
+	add a, 'a' - 10
+
+_lsnldone:
+	bcall(_PutC)
+	ret
+
+;displays hl in binary	
+disp_hl_bin:
+	
+	;use b as mask.  rotate b until 1 is shifted out.
+	ld b, $80
+_hloop:
+	ld a, b
+	and h
+	cp 0
+	jr nz, _hloop_one
+ 	ld a, '0'
+	jr _hloop_print
+_hloop_one:
+	ld a, '1'
+_hloop_print:
+	bcall(_PutC)
+	srl b
+	jr nc, _hloop
+
+	ld b, $80
+_lloop:
+	ld a, b
+	and l
+	cp 0
+	jr nz, _lloop_one
+ 	ld a, '0'
+	jr _lloop_print
+_lloop_one:
+	ld a, '1'
+_lloop_print:
+	bcall(_PutC)
+	srl b
+	jr nc, _lloop
+
+	ret
+
+
+_start_string0:
+	.db "rng test\0"
+_start_string1:
+	.db "press enter for\0"
+_start_string2:
+        .db "next number\0"
+
+_db_rng_seed:
+	.dw 0, 0
 
 _num:
 	.dw 0, 0
+
+;calculates e % c
+_mod_e_c:
+	ld a, 0
+	ld b, 8
+_modloop:
+	sla e
+	rla
+	jr c, _modoverflow
+	cp c
+	jr c, _modskip
+_modoverflow:
+	sub c
+_modskip:
+	djnz _modloop
+	nret
+
+;generates 7 unique random numbers from 0 to 6 (should generalize this) and
+
+;puts them in the memory location pointed by hl
+generate_7_random:
+	;fill the list of random numbers
+	ld de, _starting_list
+	ld b, 7
+	ld a, 0
+_fill_starting_list_loop:
+	ld (de), a
+	inc a
+	inc de
+	djnz _fill_starting_list_loop
+	
+	;now, move numbers from that list to the destination randomly
+	ld a, 6
+_shuffle_loop:
+	;generate a random number and modulo by a
+	push af
+		push hl
+			call rng
+		pop hl
+		
+		;result equals result mod a
+		ld a, e
+		and $07
+		ld e, a
+	pop af
+	ld b, a   ;need to calc a % (b+1)
+	inc b
+	ld a, e
+_mod2loop:
+	cp b
+	jr c, _moddone
+	sub b
+	jr _mod2loop
+_moddone:
+	ld e, a
+	dec b
+	ld a, b	
+	
+	;e contains the random number.  Save in b.
+	ld b, e
+	ld de, _starting_list
+	push af
+	;cool.  We have a valid random number in b.  Now we need to go that far through
+	;the list, skipping over zeroes
+_list_zero_skip:
+		ld a, (de)
+		cp $ff
+		jr nz, _dont_skip_element
+		inc de
+		jr _list_zero_skip
+
+_dont_skip_element:
+		;if the list thing wasn't zero, it counts for something, so decrement b
+		;and increment the list index.
+		dec b
+		bit 7, b
+		jr nz, _list_zero_skip_done
+		inc de
+		jr _list_zero_skip
+
+_list_zero_skip_done:	
+		;de now points to the element of the list that we want to copy to the
+		;result list.
+		ld a, (de)
+		
+		;store the selected number in the results list.
+		ld (hl), a
+		
+		;clear that entry in the selection list
+		ld a, $ff
+		ld (de), a
+		
+		;move on to next array index
+		inc de
+		inc hl
+	pop af
+	dec a
+	bit 7, a
+	jr z, _shuffle_loop		;go back to top if a is non-negative.
+		
+	ret
+	
+_starting_list:
+	.db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+
+_random_list:
+	.db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+
+_double_count:
+	.db 0, 0, 0, 0, 0, 0, 0, 0
+
 .end
 .end
