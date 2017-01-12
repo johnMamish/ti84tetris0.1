@@ -109,6 +109,8 @@ _piece_gen_0:
 	ld (_rand_bag_count), a
 	ld hl, _rand_bag_list
 	call generate_7_random
+	ld hl, _rand_bag_list + 7
+	call generate_7_random
 	
 	;get the first piece of the "random bag" in de.
 	ld a, (_rand_bag_count)
@@ -786,16 +788,27 @@ _piece_gen:
 	ld (_active_pos_y), a
 	ld a, 5
 	ld (_active_pos_x), a
-	
-	;if _bag_list_count < 7, don't generate new pieces.
+	   
+	;3 cases for rand bag count value:
+	;    we have use 7 pieces: generate 7 more
+	;    we have used 14 pieces: generate 7 more and reset _rand_bag_count
+	;    else: do nothing.
 	ld a, (_rand_bag_count)
 	cp 7
-	jr c, _block_out_test
-	
-	;generate 7 new pieces.
+	jr z, _generate_7_rand
+	cp 14
+	jr z, _generate_14_rand
+	jr _block_out_test
+
+_generate_7_rand:
+	ld hl, _rand_bag_list
+	call generate_7_random
+	jr _block_out_test
+
+_generate_14_rand:
 	ld a, 0
 	ld (_rand_bag_count), a
-	ld hl, _rand_bag_list
+	ld hl, _rand_bag_list + 7
 	call generate_7_random
 	
 _block_out_test:
@@ -1128,7 +1141,7 @@ _big_sprite_bit_loop_done:
 	djnz _big_sprite_byte_loop
 	
 	;jump over drawing pause
-	jp _draw_score
+	jp _next_piece_draw_loop
 	;TODO: draw the word "pause"
 _draw_pause:
 	ld d, $20
@@ -1136,10 +1149,77 @@ _draw_pause:
 	ld hl, _pause_string
 	call put_numerical_string
 
-;draw the next piece
+;XXX TODO draw the next piece
 _next_piece_draw_loop:
+	ld a, (_rand_bag_count)
 
+;a3b9
+_next_piece_not_14:
+	;multiply piece "id" by 20 to get index.
+	ld l, a
+	ld h, 0
+	ld de, _rand_bag_list
+	add hl, de
+	ld a, (hl)
+	ld e, a
+	ld d, 0
 	
+	;now de holds the "id" of the next piece.  We need to * it by 20.
+	ld h, d
+	ld l, e
+	add hl, hl
+	add hl, hl
+	add hl, de
+	add hl, hl
+	add hl, hl
+	ld de, _pieces
+	add hl, de
+	
+	ld d, 65			; d holds x pos
+	ld e, 2
+	
+	ld b, 4
+	
+_big_sprite_byte_loop2:
+	;get next row into a
+	ld a, (hl)
+_big_sprite_bit_loop2:
+	bit 7, a
+	jr z, _big_sprite_bit_loop_done2
+	;bit 7 of a was nonzero, so we need to put a sprite at the appropriate
+	;location
+	push hl
+		push bc
+			push de
+				push af
+					ld hl, _big_block_sprite
+					ld b, 1
+					ld c, 3
+					call put_sprite
+				pop af
+			pop de
+		pop bc
+	pop hl
+
+_big_sprite_bit_loop_done2:
+	;prepare for next loop
+	sla a		;shift over next bit
+	inc d		;x-pos += 3.  inc 3 times is cheapest
+	inc d
+	inc d
+	cp 0		;if a is 0, we can be done with this byte.
+	jr nz, _big_sprite_bit_loop2
+	
+	;reset x coordinate and increment y-coordinate
+	ld d, 65						; d holds x pos
+	
+	inc e
+	inc e
+	inc e
+	
+	inc hl
+	djnz _big_sprite_byte_loop2
+
 _draw_score:
 	;draw score
 	;Translate bcd number at _score to a string.  Pretty easy, really.
@@ -1251,7 +1331,7 @@ _right_border_loop:
 	add hl, de
 	ex de, hl
 	ld b, a
-	ld a, 7
+	ld a, 14
 	sub b
 	;a now contains the number of loops to do
 	ld b, a
@@ -1436,6 +1516,7 @@ _backup_piece:
 ;variables to keep track of piece generation information
 ;list of 7 pieces
 _rand_bag_list:
+	.db 0, 0, 0, 0, 0, 0, 0
 	.db 0, 0, 0, 0, 0, 0, 0
 
 ;pointer to list of 7 pieces
